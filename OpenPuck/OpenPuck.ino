@@ -69,8 +69,8 @@ static uint8_t g_usbCfgDesc[512];
 // Per-mode USB serial suffix (modes 1..MODE_MAX: X=xbox N=hori L=lizard P=swpro S=ps5 G=hidgyro Q=ps5game
 // D=ds4game 3=ps3 O=original-xbox J=dinput I=sinput).
 // 'C' is reserved for the CDC mode, see puck_hid.cpp
-static const char MODE_SUFFIX[] = { 'X', 'N', 'L', 'P', 'S', 'G',
-				    'Q', 'D', '3', 'O', 'J', 'I' };
+static const char MODE_SUFFIX[] = { 'X', 'N', 'L', 'P', 'S', 'G', 'Q',
+				    'D', '3', 'O', 'J', 'I', 'H' };
 // Fixed-interface flags captured at boot so usbReenumerate (dynamic mount, no reboot) replays them.
 static bool s_dynWantWebusb = false, s_dynWantWakeMouse = false;
 
@@ -91,14 +91,25 @@ void usbReenumerate(uint8_t k)
 				     g_usbMode - 1 :
 				     0],
 		 (unsigned)k);
-	USBDevice.setSerialDescriptor(g_usbSerial);
+	if (g_usbMode == MODE_SW2_PRO) {
+		USBDevice.setSerialDescriptor("00");
+	} else {
+		USBDevice.setSerialDescriptor(g_usbSerial);
+	}
 	if (s_dynWantWakeMouse)
 		wakeHidAddInterface(); // HID instance 0
 	g_active->mountSlots(
 		k); // mode's fixed HIDs (if any) + k slot interfaces
 	if (s_dynWantWebusb)
 		USBDevice.addInterface(usb_web);
-	USBDevice.setConfigurationAttribute(0x80 | 0x20);
+	if (g_usbMode == MODE_SW2_PRO) {
+		// Match the captured Nintendo configuration header exactly.
+		g_usbCfgDesc[6] = 4; // iConfiguration = "Config_0"
+		USBDevice.setConfigurationAttribute(0xc0);
+		USBDevice.setConfigurationMaxPower(500);
+	} else {
+		USBDevice.setConfigurationAttribute(0x80 | 0x20);
+	}
 	USBDevice.attach();
 }
 
@@ -184,13 +195,14 @@ void setup()
 	// clean-PS modes skip BOTH the wake mouse and WebUSB -- no config panel / host-wake; chord back to Steam
 	// (back-paddle 4 + A) to reach the panel. Normal MODE_PS5 / MODE_HIDGYRO keep wake + panel.
 	const bool psClean = modeIsCleanPS(g_usbMode);
+	const bool consoleClean = modeIsCleanConsole(g_usbMode);
 	const bool dynamic = g_active->dynamicMount();
 
 	if (dynamic) {
 		// Dynamic mount: present only ACTIVELY-CONNECTED controllers; usbReenumerate re-attaches (no reboot)
 		// as the set changes. Emulated modes are never puck; clean-PS drops the wake mouse + WebUSB.
-		s_dynWantWakeMouse = !psClean;
-		s_dynWantWebusb = !psClean;
+		s_dynWantWakeMouse = !consoleClean;
+		s_dynWantWebusb = !consoleClean;
 		USBDevice.detach();
 		delay(30);
 		USBDevice.clearConfiguration();
@@ -280,7 +292,7 @@ void setup()
 		"HIDGYRO(ds4+motion)",	 "PS5(dualsense,game/clean)",
 		"DS4(ds4,game/clean)",	 "PS3(dualshock3/sixaxis)",
 		"XBOX-OG(controller s)", "DINPUT(joystick+motion)",
-		"SINPUT(sdl-native)"
+		"SINPUT(sdl-native)",	 "SWITCH2(horipad-o/clean)"
 	};
 	Serial.printf("# copycat up: unit=%s board=%s, mode=%s\n", g_unit,
 		      g_board,

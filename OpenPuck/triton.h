@@ -92,6 +92,9 @@ struct PuckInput {
 	int16_t lpx, lpy, rpx, rpy; // left / right trackpad coords (int16)
 	int16_t ax, ay, az; // accelerometer
 	int16_t gx, gy, gz; // gyroscope
+
+	// Triton 0x42/0x45 IMU source clock, microseconds
+	uint32_t imuTimestampUs;
 };
 #include "bonds.h" // NSLOT
 extern PuckInput g_in[NSLOT];

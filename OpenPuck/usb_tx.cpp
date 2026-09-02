@@ -73,6 +73,20 @@ void usbTxHid(Adafruit_USBD_HID *hid, uint8_t rid, const void *data,
 	__set_PRIMASK(pm);
 }
 
+void usbTxFlushHid(Adafruit_USBD_HID *hid)
+{
+	if (!hid)
+		return;
+	uint32_t pm = __get_PRIMASK();
+	__disable_irq();
+	for (int i = 0; i < TX_CHAN_MAX; i++)
+		if (g_chan[i].hid == hid) {
+			g_chan[i].head = g_chan[i].tail = 0;
+			break;
+		}
+	__set_PRIMASK(pm);
+}
+
 // Send at most one ready report per destination per call. After a send the endpoint stays busy until the host
 // polls it, so the next report for that destination goes out from tud_hid_report_complete_cb (the instant the
 // host reads it) -- that chaining is what paces each stream to the host's poll rate. The usbtx task calls this

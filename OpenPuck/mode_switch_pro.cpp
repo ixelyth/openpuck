@@ -945,6 +945,8 @@ void SwitchProController::mountSlots(uint8_t k)
 		// don't stream 0x30 before the (new) host has re-selected report mode.
 		g_swProReportMode[u] = 0;
 		g_jcQh[u] = g_jcQt[u] = 0;
+		// Discard stale queued state across re-enumeration.
+		usbTxFlushHid(&g_swPro[u]);
 		// reset the rumble decoder + relay dedup so a stale amplitude from a
 		// prior session can't carry across the reconnect
 		hdrReset(u);
@@ -955,32 +957,31 @@ void SwitchProController::mountSlots(uint8_t k)
 void SwitchProController::task()
 {
 	for (uint8_t s = 0; s < g_usbMountCount; s++) {
-		if (!g_swPro[s].ready())
-			continue;
-		// Deferred user-cal flash write (queued by the USB ISR; debounced so a calibration write-burst
-		// is one save). Per-slot: each Pro Controller saves its own mirror.
+		uint32_t now = millis();
+		// Deferred per-slot user-cal flash write is queued by the USB ISR and
+		// debounced into one save. Persistence must not depend on endpoint readiness.
 		if (g_userCalDirty[s] &&
-		    (unsigned long)(millis() - g_userCalDirtyMs[s]) > 250u) {
+		    (unsigned long)(now - g_userCalDirtyMs[s]) > 250u) {
 			g_userCalDirty[s] = false;
 			saveUserCal((uint8_t)s);
 		}
-		// drain handshake/subcommand replies first (ordered) -- one report per slot per call so a
-		// bursty host-init doesn't starve the streamed 0x30
-		if (g_jcQh[s] != g_jcQt[s]) {
+		// Drain handshake/subcommand replies in order, one per slot per call,
+		// without letting bursty host init starve a due 0x30 state report.
+		if (g_swPro[s].ready() && g_jcQh[s] != g_jcQt[s]) {
 			JcRep *r = &g_jcQ[s][g_jcQh[s]];
 			usbTxHid(&g_swPro[s], r->rid, r->data, JC_REPLEN);
 			g_jcQh[s] = (uint8_t)((g_jcQh[s] + 1) % JCQ_N);
-			// one report per slot per call; the rest next loop
-			continue;
+			// one queued reply per slot per call; the rest wait for the next loop
 		}
-		// not until the host has finished init + selected 0x30
-		if (g_swProReportMode[s] != 0x30)
+		// Do not stream until host init has selected report mode 0x30.
+		if (g_swProReportMode[s] != 0x30 ||
+		    now - g_swProLastMs[s] < USB_STREAM_MS)
 			continue;
-		if (millis() - g_swProLastMs[s] < USB_STREAM_MS)
-			continue;
-		g_swProLastMs[s] = millis();
+		g_swProLastMs[s] = now;
 		uint8_t p[63];
 		switchProBuild((uint8_t)s, p);
+		// Queue the newest state even while the endpoint is busy. usb_tx's bounded drop-oldest policy
+		// preserves current input rather than replaying stale held state after a transient stall.
 		usbTxHid(&g_swPro[s], 0x30, p, sizeof p);
 	}
 }

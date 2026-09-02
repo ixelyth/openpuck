@@ -3,6 +3,7 @@
 #include "puck_hid.h"
 #include "mode_xinput.h"
 #include "mode_switch_hori.h"
+#include "mode_switch2_pro.h"
 #include "mode_switch_pro.h"
 #include "mode_ps5.h"
 #include "mode_hidgyro.h"
@@ -30,6 +31,8 @@ IController *controllerFor(uint8_t mode)
 		return &g_switchHori;
 	case MODE_SW_PRO:
 		return &g_switchPro;
+	case MODE_SW2_PRO:
+		return &g_switch2Pro;
 	case MODE_PS5:
 		return &g_ps5Ctl;
 	case MODE_HIDGYRO:
