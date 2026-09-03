@@ -91,7 +91,8 @@ void usbReenumerate(uint8_t k)
 				     g_usbMode - 1 :
 				     0],
 		 (unsigned)k);
-	USBDevice.setSerialDescriptor(g_usbSerial);
+	if (g_usbMode != MODE_PS5_GAME)
+		USBDevice.setSerialDescriptor(g_usbSerial);
 	if (s_dynWantWakeMouse)
 		wakeHidAddInterface(); // HID instance 0
 	g_active->mountSlots(
@@ -235,7 +236,8 @@ void setup()
 			snprintf(g_usbSerial, sizeof g_usbSerial, "%s%c%d",
 				 g_unit, MODE_SUFFIX[g_usbMode - 1],
 				 bondedSlotCount() > 0 ? bondedSlotCount() : 1);
-			USBDevice.setSerialDescriptor(g_usbSerial);
+			if (g_usbMode != MODE_PS5_GAME)
+				USBDevice.setSerialDescriptor(g_usbSerial);
 		}
 
 		// SDL3's Proteus/Triton HIDAPI driver only binds slot HIDs on USB interfaces 2..5. Register WebUSB (IF 0)

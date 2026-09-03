@@ -6,6 +6,7 @@
 #include "bonds.h"
 #include "usb_mount.h"
 #include "usb_tx.h"
+#include "ps5_topology.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <string.h>
@@ -213,7 +214,8 @@ void Ps5Controller::usbIdentity()
 {
 	USBDevice.setID(0x054C, 0x0CE6);
 	USBDevice.setVersion(0x0200);
-	USBDevice.setDeviceVersion(0x0110);
+	USBDevice.setDeviceVersion(g_usbMode == MODE_PS5_GAME ? 0x0100 :
+								0x0110);
 	USBDevice.setManufacturerDescriptor("Sony Interactive Entertainment");
 	USBDevice.setProductDescriptor("DualSense Wireless Controller");
 }
@@ -226,12 +228,14 @@ void Ps5Controller::beginPool()
 		g_ps5[s].enableOutEndpoint(true);
 		g_ps5[s].setReportCallback(PS5_GETCB[s], PS5_SETCB[s]);
 		g_ps5[s].setReportDescriptor(PS5_HID_DESC, sizeof PS5_HID_DESC);
-		g_ps5[s].setPollInterval(1);
+		g_ps5[s].setPollInterval(g_usbMode == MODE_PS5_GAME ? 6 : 1);
 		g_ps5[s].begin();
 	}
 }
 void Ps5Controller::mountSlots(uint8_t k)
 {
+	if (g_usbMode == MODE_PS5_GAME && k)
+		ps5TopologyAddInterface();
 	for (uint8_t u = 0; u < k; u++)
 		USBDevice.addInterface(g_ps5[u]);
 }

@@ -42,7 +42,7 @@
 #define MODE_PS5 5
 // DS4-layout generic HID gamepad + gyro (+ wake mouse + WebUSB panel)
 #define MODE_HIDGYRO 6
-// DualSense, CLEAN single-HID (no wake/WebUSB) so PC games classify it as PlayStation (Fortnite)
+// DualSense, CLEAN Sony audio+HID USB topology (no wake/WebUSB) for native PC games
 #define MODE_PS5_GAME 7
 // DS4, CLEAN single-HID (no wake/WebUSB) for game PlayStation classification
 #define MODE_DS4_GAME 8
@@ -60,9 +60,9 @@
 #define MODE_SINPUT 12
 #define MODE_MAX 12
 
-// The two "game" personalities drop the wake-mouse + WebUSB interfaces so the device is a genuine single-HID PS
-// controller (some PC games -- e.g. Fortnite/UE GameInput -- refuse PS classification when extra interfaces are
-// present). Cost: no config panel / host-wake while in these modes; chord back to Steam (back4 + A) for the panel.
+// The two "game" personalities drop OpenPuck-only wake/WebUSB interfaces. PS5 Game reproduces the
+// genuine DualSense audio+HID interface topology; DS4 Game remains a bare DS4 HID. Cost: no config panel /
+// host-wake in these modes; chord back to Steam (back4 + A) to reach the panel.
 static inline bool modeIsCleanPS(uint8_t m)
 {
 	return m == MODE_PS5_GAME || m == MODE_DS4_GAME || m == MODE_PS3;
