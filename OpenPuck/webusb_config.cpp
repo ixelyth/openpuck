@@ -106,8 +106,8 @@ static bool boardCommand(uint8_t op)
 //                [v20: p[187..194] per-type trackpad->stick map, 4x2B {left pad, right pad} (PS_OFF/LEFT/RIGHT)]
 //                [v21: p[53] rumble strength as PERCENT/2 (field 22, revived); p[195] rumble style
 //                 (field 39, RUMBLE_STYLE_* in haptics.h)]
-//                p[196..202]: Switch 2 Pro L4/R4/L5/R5/View/Menu/Steam targets (fields 90..96)
-#define WB_PAYLEN 201
+//                p[196..203]: Switch 2 Pro L4/R4/L5/R5/View/Menu/Steam/QAM targets (fields 90..97)
+#define WB_PAYLEN 202
 // The blob send is drop-on-full (never blocks loop), so the vendor TX FIFO MUST be able to hold a whole blob
 // -- otherwise tud_vendor_write_available() never reaches the frame size and EVERY frame is dropped (blank
 // panel / stale mappings). The Makefile sets -DCFG_TUD_VENDOR_TX_BUFSIZE=256; guard it here so a build without
@@ -132,7 +132,7 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
-	// Switch 2 Pro mappings use fields 90..96 and blob bytes p[196..202].
+	// Switch 2 Pro mappings use fields 90..97 and blob bytes p[196..203].
 	// protocol version (21 = +rumble style (field 39, blob p[195]) and the REVIVED rumble-strength field 22
 	// at blob p[53], now carrying percent/2; 20 = +per-type trackpad->stick mapping (fields 80..87, blob
 	// p[187..194]); 19 = +Switch Pro legacy-gyro select (field 38, blob p[186]); the Switch report-rate and
@@ -143,7 +143,7 @@ static void webusbSendBlob()
 	// unknown op; 15 = +staged firmware-update ops 0x20..0x24; 14 = +landAll87 toggle; 13 = +per-slot link
 	// stats; 12 = +relay rate + clock fingerprint; 11 = +reset cause; 10 = +ledBright per type; 9 = +per-type
 	// cfg; 8 = +per-slot link status; 7 = +raw accel; 6 = +swPro120/gyroScale)
-	p[2] = 22;
+	p[2] = 23;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -325,9 +325,9 @@ static void webusbSendBlob()
 		p[187 + et * 2] = g_padStickCfg[et][0];
 		p[188 + et * 2] = g_padStickCfg[et][1];
 	}
-	// Switch 2 Pro keeps these seven source mappings separate from
-	// generic ET_SWITCH so GL/GR/C edits cannot alter Switch Pro/HORI.
-	for (int i = 0; i < 7; i++)
+	// Switch 2 Pro keeps these eight source mappings separate from
+	// generic ET_SWITCH so GL/GR/C/QAM edits cannot alter Switch Pro/HORI.
+	for (int i = 0; i < 8; i++)
 		p[196 + i] = switch2ProMapGet((uint8_t)i);
 	// CRITICAL: usb_web.write() SPINS (`while (remain && _connected) yield();`) until the IN FIFO drains or the
 	// panel disconnects. If the panel holds the WebUSB interface open but stops reading its IN endpoint -- a
@@ -1054,6 +1054,7 @@ void webusbPoll()
 				case 94:
 				case 95:
 				case 96:
+				case 97:
 					switch2ProMapSet((uint8_t)(f - 90), v);
 					break;
 

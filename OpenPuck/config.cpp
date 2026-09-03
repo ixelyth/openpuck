@@ -117,9 +117,9 @@ struct Cfg {
 // tail field treats as "unset" and replaces with its default.
 #define CFG_LEN_MIN (offsetof(struct Cfg, chordDpad))
 
-static uint8_t g_cfgExt[CFG_EXT_STORAGE_BYTES] = {
-	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
-};
+static uint8_t g_cfgExt[CFG_EXT_STORAGE_BYTES] = { 0xFF, 0xFF, 0xFF, 0xFF,
+						   0xFF, 0xFF, 0xFF, 0xFF,
+						   0xFF, 0xFF, 0xFF };
 
 uint8_t cfgExtRead(uint8_t index)
 {

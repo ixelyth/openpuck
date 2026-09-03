@@ -589,7 +589,7 @@ const TYPE_DEFS = [
   {key:"DS5", name:"DS5", labels:{1:"Cross",2:"Circle",3:"Square",4:"Triangle",5:"L1",6:"R1",7:"L3",8:"R3",9:"Create",10:"Options",11:"PS",19:"L2",20:"R2",...DPAD,16:"Touchpad Click",17:"Mute"}},
 ];
 // Which emulated type a USB mode belongs to (mirror of firmware etypeForMode); -1 = puck mode (no type).
-const SW2_SOURCE_NAMES = ["L4 (back upper-left)","R4 (back upper-right)","L5 (back lower-left)","R5 (back lower-right)","View","Menu","Steam"];
+const SW2_SOURCE_NAMES = ["L4 (back upper-left)","R4 (back upper-right)","L5 (back lower-left)","R5 (back lower-right)","View","Menu","Steam","QAM (3 dots)"];
 const SW2_TARGETS = [[1,"A"],[2,"B"],[3,"X"],[4,"Y"],[5,"L"],[6,"R"],[7,"L-Stick"],[8,"R-Stick"],[9,"Minus"],[10,"Plus"],[11,"Home"],[12,"D-pad Up"],[13,"D-pad Down"],[14,"D-pad Left"],[15,"D-pad Right"],[18,"Capture"],[19,"ZL"],[20,"ZR"],[21,"C"],[22,"GR"],[23,"GL"]];
 const sw2MapEls=[];
 (function buildSw2Map(){
@@ -961,9 +961,9 @@ function applyBlob(p){
   const rumbleScale=rumbleCap?p[51]*2:200, rumbleStyle=rumbleCap?p[193]:0;
   const rssi=(p.length>37?p[37]:0);
 
-  // Seven Switch 2 Pro physical-source mappings occupy payload p[194..200].
-  const sw2MapCap=(p[0]>=22 && p.length>200);
-  const sw2Map=sw2MapCap?p.slice(194,201):[9,10,23,22,18,11,21];
+  // Eight Switch 2 Pro physical-source mappings occupy payload p[194..201].
+  const sw2MapCap=(p[0]>=23 && p.length>201);
+  const sw2Map=sw2MapCap?p.slice(194,202):[19,20,23,22,9,10,11,18];
   // per-slot link status (protocol v8, p.length >= 73)
   const hasSlotsData = p.length >= 73;
   if (hasSlotsData) {
@@ -1301,7 +1301,7 @@ function buildBackup(p, bp){
   // map snapshot would be empty, which would incorrectly clear bindings on restore.
   if(lizardLoaded && lizardCapable() && !lizardBusy)
     cfg.lizardMap=lizardBindings.map(b=>({outType:b.outType,od:b.od.slice(),trig:b.trig>>>0,hold:b.hold>>>0}));
-  if(p[0]>=22 && p.length>200) cfg.sw2Map=Array.from(p.slice(194,201));
+  if(p[0]>=23 && p.length>201) cfg.sw2Map=Array.from(p.slice(194,202));
   return { magic:"openpuck-backup", version:(cfg.lizardMap?2:1), bonds, config:cfg };
 }
 function downloadBackup(obj){
@@ -1347,7 +1347,7 @@ async function importBackup(file){
   // slots, and the final commit.
   const typeN=Array.isArray(c.types)?Math.min(c.types.length,4):0;
   const lizardN=(Array.isArray(c.lizardMap) && lizardCapable())?Math.min(c.lizardMap.length,LZ_MAX):0;
-  const baseN=6 + (Array.isArray(c.chordD)?4:0) + (c.swGyroLegacy!==undefined?1:0) + (Array.isArray(c.sw2Map)?7:0);
+  const baseN=6 + (Array.isArray(c.chordD)?4:0) + (c.swGyroLegacy!==undefined?1:0) + (Array.isArray(c.sw2Map)?Math.min(c.sw2Map.length,8):0);
   const padStickN=Array.isArray(c.types)?c.types.slice(0,typeN).filter(t=>Array.isArray(t.padStick)).length*2:0;
   const total=baseN + typeN*9 + padStickN + lizardN + 4 + 1;
   let step=0, stage="";
@@ -1378,7 +1378,7 @@ async function importBackup(file){
     // Switch Pro gyro mapping (v19+ backups only). Backups also carry rumble/swProRate/swGyro10 from the
     // removed settings; those fields no longer exist on the puck, so they are not replayed.
     if(c.swGyroLegacy!==undefined) await sf(38, c.swGyroLegacy?1:0);
-    if(Array.isArray(c.sw2Map)) for(let i=0;i<7;i++) await sf(90+i, c.sw2Map[i]);
+    if(Array.isArray(c.sw2Map)) for(let i=0;i<Math.min(c.sw2Map.length,8);i++) await sf(90+i, c.sw2Map[i]);
     // c.types is absent in some very old backups created before per-type paddle/haptic config
     // was added to the panel export; guard so a missing field never crashes the import mid-flight.
     if(typeN){

@@ -78,7 +78,7 @@ static volatile uint32_t g_sw2Counter32 = 0;
 static int8_t g_sw2LastRumbleBond = -1;
 static uint16_t g_sw2LastRumbleLeft = 0;
 static uint16_t g_sw2LastRumbleRight = 0;
-static uint8_t g_sw2Map[7] = { 9, 10, 23, 22, 18, 11, 21 };
+static uint8_t g_sw2Map[8] = { 19, 20, 23, 22, 9, 10, 11, 18 };
 static bool g_sw2MapLoaded = false;
 
 static void switch2ProLoadMap()
@@ -86,9 +86,15 @@ static void switch2ProLoadMap()
 	if (g_sw2MapLoaded)
 		return;
 	g_sw2MapLoaded = true;
-	static const uint8_t def[7] = { 9, 10, 23, 22, 18, 11, 21 };
+	static const uint8_t legacyDef[7] = { 9, 10, 23, 22, 18, 11, 21 };
+	static const uint8_t def[8] = { 19, 20, 23, 22, 9, 10, 11, 18 };
+	const bool qamMissing = cfgExtRead(10u) == 0xffu;
+	bool migrateLegacyDefaults = qamMissing;
+	for (uint8_t i = 0; i < 7 && migrateLegacyDefaults; i++)
+		migrateLegacyDefaults = cfgExtRead((uint8_t)(3u + i)) ==
+					legacyDef[i];
 	bool normalize = false;
-	for (uint8_t i = 0; i < 7; i++) {
+	for (uint8_t i = 0; i < 8; i++) {
 		const uint8_t saved = cfgExtRead((uint8_t)(3u + i));
 		if (saved <= 23u) {
 			g_sw2Map[i] = saved;
@@ -98,6 +104,13 @@ static void switch2ProLoadMap()
 			normalize = true;
 		}
 	}
+	if (migrateLegacyDefaults) {
+		for (uint8_t i = 0; i < 7; i++) {
+			g_sw2Map[i] = def[i];
+			cfgExtWrite((uint8_t)(3u + i), def[i]);
+		}
+		normalize = true;
+	}
 	if (normalize)
 		saveCfg();
 }
@@ -105,13 +118,13 @@ static void switch2ProLoadMap()
 uint8_t switch2ProMapGet(uint8_t index)
 {
 	switch2ProLoadMap();
-	return index < 7u ? g_sw2Map[index] : 0u;
+	return index < 8u ? g_sw2Map[index] : 0u;
 }
 
 void switch2ProMapSet(uint8_t index, uint8_t value)
 {
 	switch2ProLoadMap();
-	if (index >= 7u || value > 23u)
+	if (index >= 8u || value > 23u)
 		return;
 	g_sw2Map[index] = value;
 	cfgExtWrite((uint8_t)(3u + index), value);
@@ -291,7 +304,6 @@ static void sw2Buttons(uint8_t slot, uint8_t b09[3], uint8_t b05[4])
 	memset(b09, 0, 3);
 	memset(b05, 0, 4);
 	uint32_t b = g_in[slot].buttons;
-	bool qam = g_qamMap && (b & TB_QAM);
 	if ((b & CHORD_BACK4) == CHORD_BACK4)
 		b &= ~(uint32_t)(TB_A | TB_B | TB_X | TB_Y | TB_DUP | TB_DDN |
 				 TB_DLF | TB_DRT);
@@ -324,13 +336,12 @@ static void sw2Buttons(uint8_t slot, uint8_t b09[3], uint8_t b05[4])
 	if (b & TB_DRT)
 		sw2SetCode(15, b09, b05);
 
-	static const uint32_t source[7] = { TB_L4,   TB_R4,   TB_L5,   TB_R5,
-					    TB_VIEW, TB_MENU, TB_STEAM };
-	for (uint8_t i = 0; i < 7; i++)
+	static const uint32_t source[8] = {
+		TB_L4, TB_R4, TB_L5, TB_R5, TB_VIEW, TB_MENU, TB_STEAM, TB_QAM
+	};
+	for (uint8_t i = 0; i < 8; i++)
 		if (b & source[i])
 			sw2SetCode(switch2ProMapGet(i), b09, b05);
-	if (qam)
-		sw2SetCode(g_qamMap, b09, b05);
 }
 
 static uint8_t sw2PowerInfo(uint8_t slot)
