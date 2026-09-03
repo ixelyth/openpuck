@@ -25,13 +25,9 @@ static inline void le16(uint8_t *p, int16_t v)
 // and 0x05 (DualSense) -- identical layout; the caller returns size-1 and leaves trailing bytes zero.
 void psNeutralCalib(uint8_t *buf);
 
-// Shared Steam-controller -> Sony sensor coordinate transform.
-// Gyro and accelerometer use the same signed permutation for coherent fusion.
-struct PsImuFrame {
-	int16_t gx, gy, gz;
-	int16_t ax, ay, az;
-};
-PsImuFrame psImuFromSteam(const PuckInput &in);
+// Convert SC2 motion into the PlayStation coordinate frame and native sensor scale.
+// Writes gyro X/Y/Z followed by accel X/Y/Z as six little-endian int16 values.
+void psImuPack(uint8_t *out, const PuckInput &in);
 void psPadClickEdge(uint8_t slot, bool pressed);
 
 // Steam trackpad s16 coords -> absolute touch surface. TOUCH_PAD_W is split into left/right halves so both

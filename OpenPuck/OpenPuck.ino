@@ -98,7 +98,12 @@ void usbReenumerate(uint8_t k)
 		k); // mode's fixed HIDs (if any) + k slot interfaces
 	if (s_dynWantWebusb)
 		USBDevice.addInterface(usb_web);
-	USBDevice.setConfigurationAttribute(0x80 | 0x20);
+	if (modeIsCleanPS(g_usbMode)) {
+		USBDevice.setConfigurationAttribute(0xC0);
+		USBDevice.setConfigurationMaxPower(500);
+	} else {
+		USBDevice.setConfigurationAttribute(0x80 | 0x20);
+	}
 	USBDevice.attach();
 }
 

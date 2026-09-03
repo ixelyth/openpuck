@@ -187,31 +187,7 @@ static void ps5Build(uint8_t usbSlot, uint8_t slot, uint8_t out[63])
 	out[9] = ((b & TB_STEAM) ? 0x01 : 0) |
 		 ((b & TB_TOUCH || b & TB_LPADC || b & TB_RPADC) ? 0x02 : 0) |
 		 ((b & TB_MUTE) ? 0x04 : 0);
-	out[15] = g_in[slot].gx & 0xFF;
-	out[16] = g_in[slot].gx >> 8;
-	out[17] = g_in[slot].gz & 0xFF;
-	out[18] = g_in[slot].gz >> 8;
-	out[19] = (-g_in[slot].gy) & 0xFF;
-	out[20] = (-g_in[slot].gy) >> 8;
-	out[21] = g_in[slot].ax & 0xFF;
-	out[22] = g_in[slot].ax >> 8;
-	out[23] = g_in[slot].ay & 0xFF;
-	out[24] = g_in[slot].ay >> 8;
-	out[25] = g_in[slot].az & 0xFF;
-	out[26] = g_in[slot].az >> 8;
-	uint16_t tlx, tly, trx, trry;
-	steamPadsToTouch(b, PS5_TOUCH_H, g_in[slot].lpx, g_in[slot].lpy,
-			 g_in[slot].rpx, g_in[slot].rpy, &tlx, &tly, &trx,
-			 &trry);
-	touchPackPads(out + 32, lTouch, rTouch, tlx, tly, trx, trry);
-	out[52] = PS5_STATUS_USB;
-	PsImuFrame imu = psImuFromSteam(g_in[slot]);
-	le16(out + 15, imu.gx);
-	le16(out + 17, imu.gy);
-	le16(out + 19, imu.gz);
-	le16(out + 21, imu.ax);
-	le16(out + 23, imu.ay);
-	le16(out + 25, imu.az);
+	psImuPack(out + 15, g_in[slot]);
 }
 
 // Dynamic-mount mode: begin() is unused (setup() calls beginPool()+usbReenumerate instead).
@@ -221,8 +197,16 @@ void Ps5Controller::begin()
 // HID budget: clean PS modes have no wake mouse (CFG_TUD_HID slots); normal PS5 keeps the wake mouse (1 HID).
 uint8_t Ps5Controller::maxSlots() const
 {
-	uint8_t cap = modeIsCleanPS(g_usbMode) ? (uint8_t)CFG_TUD_HID :
-						 (uint8_t)(CFG_TUD_HID - 1);
+	// Clean-PS modes exist to present exactly what a host that CLASSIFIES the USB device expects of a real
+	// Sony pad -- GameInput / Windows.Gaming.Input and the native-PlayStation paths in games look at the
+	// whole device, not just the VID/PID, and refuse the PS glyph path for a composite. One connected
+	// controller = one HID interface = a non-composite device (no MI_xx on Windows). A SECOND controller
+	// would add a second interface and make it composite again, so the clean modes are deliberately
+	// single-pad; use MODE_PS5 / MODE_HIDGYRO (composite either way, and they keep the panel + host-wake)
+	// when you want several controllers at once.
+	if (modeIsCleanPS(g_usbMode))
+		return 1;
+	uint8_t cap = (uint8_t)(CFG_TUD_HID - 1);
 	return cap < NSLOT ? cap : (uint8_t)NSLOT;
 }
 void Ps5Controller::usbIdentity()
