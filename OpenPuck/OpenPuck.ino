@@ -67,7 +67,8 @@ using namespace Adafruit_LittleFS_Namespace;
 static uint8_t g_usbCfgDesc[512];
 
 // Per-mode USB serial suffix (modes 1..MODE_MAX: X=xbox N=hori L=lizard P=swpro S=ps5 G=hidgyro Q=ps5game
-// D=ds4game 3=ps3 O=original-xbox J=dinput I=sinput).
+// D=ds4game 3=ps3 O=original-xbox J=dinput I=sinput H=sw2pro).
+// Switch 2 Pro overrides the generated suffix serial with the captured "00".
 // 'C' is reserved for the CDC mode, see puck_hid.cpp
 static const char MODE_SUFFIX[] = { 'X', 'N', 'L', 'P', 'S', 'G', 'Q',
 				    'D', '3', 'O', 'J', 'I', 'H' };
@@ -292,7 +293,7 @@ void setup()
 		"HIDGYRO(ds4+motion)",	 "PS5(dualsense,game/clean)",
 		"DS4(ds4,game/clean)",	 "PS3(dualshock3/sixaxis)",
 		"XBOX-OG(controller s)", "DINPUT(joystick+motion)",
-		"SINPUT(sdl-native)",	 "SWITCH2(horipad-o/clean)"
+		"SINPUT(sdl-native)",	 "SWITCH2(pro/clean)"
 	};
 	Serial.printf("# copycat up: unit=%s board=%s, mode=%s\n", g_unit,
 		      g_board,
