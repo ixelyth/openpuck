@@ -86,12 +86,17 @@ void usbReenumerate(uint8_t k)
 	USBDevice.setConfigurationBuffer(g_usbCfgDesc, sizeof g_usbCfgDesc);
 	g_active->usbIdentity(); // clearConfiguration reset VID/PID/strings -- restore them
 	// serial carries the mounted count so the host invalidates its cached config descriptor on a change
-	snprintf(g_usbSerial, sizeof g_usbSerial, "%s%c%u", g_unit,
-		 MODE_SUFFIX[(g_usbMode >= 1 && g_usbMode <= MODE_MAX) ?
-				     g_usbMode - 1 :
-				     0],
-		 (unsigned)k);
-	USBDevice.setSerialDescriptor(g_usbSerial);
+	// A physical DualSense has iSerial=0. Do not invent a serial for
+	// MODE_PS5_GAME; the native composite descriptor stays constant as RF
+	// controllers connect/disconnect, so Windows does not need a cache key.
+	if (g_usbMode != MODE_PS5_GAME) {
+		snprintf(g_usbSerial, sizeof g_usbSerial, "%s%c%u", g_unit,
+			 MODE_SUFFIX[(g_usbMode >= 1 && g_usbMode <= MODE_MAX) ?
+					     g_usbMode - 1 :
+					     0],
+			 (unsigned)k);
+		USBDevice.setSerialDescriptor(g_usbSerial);
+	}
 	if (s_dynWantWakeMouse)
 		wakeHidAddInterface(); // HID instance 0
 	g_active->mountSlots(

@@ -6,6 +6,7 @@
 #include "bonds.h"
 #include "usb_mount.h"
 #include "usb_tx.h"
+#include "ps5_native_usb.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <string.h>
@@ -190,6 +191,43 @@ static void ps5Build(uint8_t usbSlot, uint8_t slot, uint8_t out[63])
 	psImuPack(out + 15, g_in[slot]);
 }
 
+const uint8_t *ps5NativeReportDescriptor(void)
+{
+	return PS5_HID_DESC;
+}
+
+uint16_t ps5NativeGetReport(uint8_t reportId, hid_report_type_t reportType,
+			    uint8_t *buffer, uint16_t reqLen)
+{
+	if (reportType == HID_REPORT_TYPE_INPUT && reportId == 0x01 && buffer &&
+	    reqLen) {
+		uint8_t report[63];
+		if (!ps5NativeBuildInput(report))
+			memset(report, 0, sizeof report);
+		uint16_t n = reqLen < sizeof report ? reqLen : sizeof report;
+		memcpy(buffer, report, n);
+		return n;
+	}
+	return ps5GetCommon(0, reportId, reportType, buffer, reqLen);
+}
+
+void ps5NativeSetReport(uint8_t reportId, hid_report_type_t reportType,
+			uint8_t const *buffer, uint16_t size)
+{
+	ps5SetCommon(0, reportId, reportType, buffer, size);
+}
+
+bool ps5NativeBuildInput(uint8_t out[63])
+{
+	if (!out)
+		return false;
+	int bond = g_usbToBond[0];
+	if (bond < 0 || bond >= NSLOT)
+		return false;
+	ps5Build(0, (uint8_t)bond, out);
+	return true;
+}
+
 // Dynamic-mount mode: begin() is unused (setup() calls beginPool()+usbReenumerate instead).
 void Ps5Controller::begin()
 {
@@ -197,14 +235,7 @@ void Ps5Controller::begin()
 // HID budget: clean PS modes have no wake mouse (CFG_TUD_HID slots); normal PS5 keeps the wake mouse (1 HID).
 uint8_t Ps5Controller::maxSlots() const
 {
-	// Clean-PS modes exist to present exactly what a host that CLASSIFIES the USB device expects of a real
-	// Sony pad -- GameInput / Windows.Gaming.Input and the native-PlayStation paths in games look at the
-	// whole device, not just the VID/PID, and refuse the PS glyph path for a composite. One connected
-	// controller = one HID interface = a non-composite device (no MI_xx on Windows). A SECOND controller
-	// would add a second interface and make it composite again, so the clean modes are deliberately
-	// single-pad; use MODE_PS5 / MODE_HIDGYRO (composite either way, and they keep the panel + host-wake)
-	// when you want several controllers at once.
-	if (modeIsCleanPS(g_usbMode))
+	if (g_usbMode == MODE_PS5_GAME)
 		return 1;
 	uint8_t cap = (uint8_t)(CFG_TUD_HID - 1);
 	return cap < NSLOT ? cap : (uint8_t)NSLOT;
@@ -213,7 +244,8 @@ void Ps5Controller::usbIdentity()
 {
 	USBDevice.setID(0x054C, 0x0CE6);
 	USBDevice.setVersion(0x0200);
-	USBDevice.setDeviceVersion(0x0110);
+	USBDevice.setDeviceVersion(g_usbMode == MODE_PS5_GAME ? 0x0100 :
+								0x0110);
 	USBDevice.setManufacturerDescriptor("Sony Interactive Entertainment");
 	USBDevice.setProductDescriptor("DualSense Wireless Controller");
 }
@@ -221,6 +253,10 @@ void Ps5Controller::usbIdentity()
 void Ps5Controller::beginPool()
 {
 	initPs5Macs();
+	if (g_usbMode == MODE_PS5_GAME) {
+		ps5NativeUsbBegin();
+		return;
+	}
 	uint8_t pool = maxSlots();
 	for (uint8_t s = 0; s < pool; s++) {
 		g_ps5[s].enableOutEndpoint(true);
@@ -232,11 +268,20 @@ void Ps5Controller::beginPool()
 }
 void Ps5Controller::mountSlots(uint8_t k)
 {
+	if (g_usbMode == MODE_PS5_GAME) {
+		// Keep the physical DualSense descriptor present even before the
+		// Steam Controller RF bond comes online. The real device has no
+		// serial, so its USB identity must not change with RF occupancy.
+		ps5NativeUsbMount();
+		return;
+	}
 	for (uint8_t u = 0; u < k; u++)
 		USBDevice.addInterface(g_ps5[u]);
 }
 void Ps5Controller::task()
 {
+	if (g_usbMode == MODE_PS5_GAME)
+		return;
 	for (uint8_t u = 0; u < g_usbMountCount; u++) {
 		if (!g_ps5[u].ready())
 			continue;
