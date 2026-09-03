@@ -1,0 +1,101 @@
+name: F27 Joy-Con 2 POC
+
+on:
+  push:
+    branches:
+      - f27-joycon2-poc
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: JoyCon2-L
+            define: 1
+          - target: JoyCon2-R
+            define: 2
+          - target: JoyCon2-Both
+            define: 3
+
+    steps:
+      - name: Check out F27
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compose Makerdiary build support
+        run: |
+          set -eu
+          git fetch origin makerdiary-mdk
+          git cherry-pick --no-commit aa4a619e52be052d683ea6db1a3dd2ee96f19420
+
+      - name: Apply isolated F27 hooks
+        run: python3 tools/f27_joycon2_poc.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Verify formatting and patch cleanliness
+        run: |
+          make check
+          git diff --check
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Keep both packages intentionally unpinned, matching makerdiary-mdk.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Generate F27 version header
+        env:
+          OPK_BUILD_VERSION: F27-${{ matrix.target }}-${{ github.sha }}
+        run: ./gen_version.sh
+
+      - name: Build standard F27 target
+        run: |
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=${{ matrix.define }}"
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-${{ matrix.target }}-standard.uf2
+
+      - name: Build Makerdiary MDK F27 target
+        run: |
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=${{ matrix.define }}"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-${{ matrix.target }}-MDK.uf2
+
+      - name: Upload F27 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-${{ matrix.target }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-${{ matrix.target }}-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-${{ matrix.target }}-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
