@@ -5,7 +5,6 @@
 
 void ps5NativeUsbBegin(void);
 void ps5NativeUsbMount(void);
-const usbd_class_driver_t *ps5NativeClassDriver(void);
 
 const uint8_t *ps5NativeReportDescriptor(void);
 uint16_t ps5NativeGetReport(uint8_t reportId, hid_report_type_t reportType,
