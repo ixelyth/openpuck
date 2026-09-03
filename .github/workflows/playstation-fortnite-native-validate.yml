@@ -1,0 +1,75 @@
+name: Validate native DualSense Fortnite POC
+
+on:
+  push:
+    branches:
+      - playstation-fortnite-dualsense-poc
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Validate formatting
+        run: |
+          make check
+          git diff --check
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install unpinned build packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Generate POC build version
+        env:
+          OPK_BUILD_VERSION: PS5-Fortnite-Native-${{ github.sha }}
+        run: ./gen_version.sh
+
+      - name: Build standard target
+        run: |
+          mkdir -p build/ps5-native build/cache/ps5-native
+          make build BUILD_PATH=build/cache/ps5-native OUTPUT_DIR=build/ps5-native
+
+      - name: Compose Makerdiary support
+        run: |
+          git fetch origin makerdiary-mdk
+          git cherry-pick --no-commit aa4a619e52be052d683ea6db1a3dd2ee96f19420
+
+      - name: Build Makerdiary MDK target
+        run: |
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-PS5-Fortnite-Native-MDK.uf2
+
+      - name: Upload hardware-test artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-PS5-Fortnite-Native-MDK
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-PS5-Fortnite-Native-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
