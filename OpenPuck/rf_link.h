@@ -115,6 +115,44 @@ extern volatile uint8_t g_battery[NSLOT];
 // charge state from report 0x43 body[0] (EChargeState: 1=discharging, 2=charging, 4=charging-done; 0=unknown)
 extern volatile uint8_t g_batteryState[NSLOT];
 
+#define RF_RECOVERY_STATUS_CHANNELS 14u
+
+enum RfChannelDesignation : uint8_t {
+	RF_CHANNEL_UNEXPLORED = 0,
+	RF_CHANNEL_GOOD = 1,
+	RF_CHANNEL_POOR = 2,
+	RF_CHANNEL_MIXED = 3,
+};
+
+struct RfChannelStatusEntry {
+	uint8_t channel;
+	uint8_t ambientRssi;
+	uint8_t designation;
+	uint8_t worstPct;
+	uint8_t meanPct;
+	uint8_t confidence;
+	uint8_t trials;
+	uint8_t penalty;
+	uint8_t recentOrder;
+};
+
+struct RfRecoveryStatus {
+	uint8_t version;
+	uint8_t flags;
+	uint8_t currentChannel;
+	uint8_t targetChannel;
+	uint8_t startupChannel;
+	uint8_t channelCount;
+	uint8_t journalWrites;
+	uint16_t ambientGeneration;
+	uint32_t journalSequence;
+	RfChannelStatusEntry channel[RF_RECOVERY_STATUS_CHANNELS];
+};
+
+void rfRecoveryRequestAmbientSurvey();
+bool rfRecoveryRequestManualHop(uint8_t channel);
+void rfRecoveryStatusSnapshot(RfRecoveryStatus *status);
+
 // TX one connected packet [LEN][S1][payload] on channel ch, then RX the reply into rfrx; decodes 0xF1.
 // rxWinUs overrides the reply-wait window (0 = use g_rxWin). Pass a tiny value for NO-ACK relays that expect
 // no reply, so they don't burn a full ~1.2ms window of dead air per haptic.
@@ -122,5 +160,6 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 		 uint16_t rxWinUs = 0);
 // Mid-session channel hop: advertise newCh on the current channel a few times, then move the poll to newCh.
 void rfHopTo(uint8_t newCh);
+bool rfChannelHandoffHostGrace(int slot);
 // Per-loop: host-frame beacons + connected-mode poll + remote-wakeup + QoS hop + per-second stats.
 void rfLinkTask();

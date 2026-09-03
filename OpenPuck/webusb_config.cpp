@@ -3,6 +3,7 @@
 #include "config.h"
 #include "bonds.h"
 #include "rf_link.h"
+#include "radio.h"
 #include "haptics.h"
 #include "puck_hid.h"
 #include "triton.h" // g_in raw IMU (diagnostic readout)
@@ -302,7 +303,7 @@ static void webusbSendBlob()
 		q[8] = g_slotRelayps[s];
 	}
 	// v14/v17: verbatim-0x87-relay experiment toggle (panel reflects + toggles it)
-	p[181] = 0; // used to be g_landAll87
+	p[181] = 0x52; // RF recovery status/journal transport capability
 	// v18: back4+D-pad mode assignments (panel renders these as selects next to the B/X/Y ones)
 	p[182] = g_chordDpad[CHD_LEFT];
 	p[183] = g_chordDpad[CHD_UP];
@@ -471,6 +472,50 @@ static void webusbDrainFlight(bool restart)
 
 // Runs on the usbd task (registered via usbTxRegisterDrain -> tud_sof_cb). Sends the blob if loop() asked for
 // one. Keeps every usb_web write/flush off the loop task so it can't block on the device event queue.
+static volatile bool g_rfStatusRequest = false;
+
+static bool webusbSendRfStatus()
+{
+	if (!usb_web.connected())
+		return false;
+	static RfRecoveryStatus status;
+	rfRecoveryStatusSnapshot(&status);
+	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9];
+	uint8_t *q = f + 2;
+	f[0] = 0xAD;
+	f[1] = (uint8_t)(sizeof f - 2u);
+	*q++ = status.version;
+	*q++ = status.flags;
+	*q++ = status.currentChannel;
+	*q++ = status.targetChannel;
+	*q++ = status.startupChannel;
+	*q++ = status.channelCount;
+	*q++ = status.journalWrites;
+	*q++ = (uint8_t)status.ambientGeneration;
+	*q++ = (uint8_t)(status.ambientGeneration >> 8);
+	*q++ = (uint8_t)status.journalSequence;
+	*q++ = (uint8_t)(status.journalSequence >> 8);
+	*q++ = (uint8_t)(status.journalSequence >> 16);
+	*q++ = (uint8_t)(status.journalSequence >> 24);
+	for (uint8_t i = 0; i < status.channelCount; i++) {
+		const RfChannelStatusEntry &entry = status.channel[i];
+		*q++ = entry.channel;
+		*q++ = entry.ambientRssi;
+		*q++ = entry.designation;
+		*q++ = entry.worstPct;
+		*q++ = entry.meanPct;
+		*q++ = entry.confidence;
+		*q++ = entry.trials;
+		*q++ = entry.penalty;
+		*q++ = entry.recentOrder;
+	}
+	if (tud_vendor_write_available() < sizeof f)
+		return false;
+	usb_web.write(f, sizeof f);
+	usb_web.flush();
+	return true;
+}
+
 static void webusbSofDrain(void)
 {
 	// If loop() has stopped beating, it's wedged -- keep pushing the blob (which carries the live stuck stage)
@@ -500,6 +545,8 @@ static void webusbSofDrain(void)
 		g_bondExportRequest = false;
 		webusbSendBondExport();
 	}
+	if (g_rfStatusRequest && webusbSendRfStatus())
+		g_rfStatusRequest = false;
 }
 // ---- live wedge reporter (0xA9) --------------------------------------------------------------------------
 // THE one channel that survives a loop() wedge on boards that wipe .noinit/GPREGRET across the watchdog reset
@@ -1085,6 +1132,39 @@ void webusbPoll()
 					//  fixed at full and the gyro mapping is now field 38)
 					// (field 25, poll RX window, removed -- g_rxWin is now FIXED/not configurable)
 					// (fields 27/28, post-connect haptic block, removed -- permanently disabled)
+
+				// RF recovery controls reuse the field setter without its generic
+				// persistence path. Field 100 persists only the selected startup channel.
+				case 97:
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				case 98:
+					rfRecoveryRequestAmbientSurvey();
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				case 99:
+					(void)rfRecoveryRequestManualHop(v);
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				case 100: {
+					static RfRecoveryStatus status;
+					rfRecoveryStatusSnapshot(&status);
+					for (uint8_t i = 0;
+					     i < status.channelCount; i++) {
+						if (status.channel[i].channel !=
+						    v)
+							continue;
+						(void)saveRfStartupLastGoodChannel(
+							v);
+						break;
+					}
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				}
 
 				// Used to be experimental g_landAll87. Persisted; blob p[181] reflects state. Now ignored.
 				case 29:

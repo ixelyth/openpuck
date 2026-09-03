@@ -264,6 +264,31 @@
       </div>
     </div>
 
+    <div class="card wide hide" id="rfRecoveryCard">
+      <h2>RF recovery &amp; channel journal</h2>
+      <div class="statgrid">
+        <div class="stat"><div class="k">Active channel</div><div class="v" id="rfActiveCh">—</div></div>
+        <div class="stat"><div class="k">Recovery target</div><div class="v" id="rfTargetCh">—</div></div>
+        <div class="stat"><div class="k">Startup channel</div><div class="v" id="rfStartupCh">—</div></div>
+        <div class="stat"><div class="k">Ambient survey</div><div class="v" id="rfSurveyState">—</div></div>
+        <div class="stat"><div class="k">Journal sequence</div><div class="v" id="rfJournalSeq">—</div></div>
+        <div class="stat"><div class="k">Journal writes this boot</div><div class="v" id="rfJournalWrites">—</div></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="rfRefresh">Refresh RF status</button>
+        <button id="rfSurvey" style="margin-left:8px">Survey ambient RF</button>
+        <span class="note" id="rfSurveyNote" style="flex:1">Ambient scans run only while no controller is linked; a request made while linked is queued.</span>
+      </div>
+      <p class="note" style="margin-top:10px"><strong>Manual Hop:</strong> after clicking Hop, use the controller once, then release all controls to neutral. A completely idle controller waits for fresh post-request input before the guarded hop can begin. <strong>Startup</strong> saves that channel for the next boot only; it does not mark the channel good, and automatic RF learning may replace it later.</p>
+      <div style="overflow-x:auto;margin-top:12px">
+        <table style="width:100%;border-collapse:collapse;font-size:0.88em">
+          <thead><tr><th>Ch</th><th>MHz</th><th>Journal</th><th>Worst</th><th>Mean</th><th>Confidence</th><th>Trials</th><th>Penalty</th><th>Ambient</th><th>Recent</th><th>Actions</th></tr></thead>
+          <tbody id="rfJournalBody"></tbody>
+        </table>
+      </div>
+      <div id="rfAmbientBars" style="display:flex;gap:4px;align-items:flex-end;height:76px;margin-top:12px;padding:8px;background:#151821;border:1px solid #272d3d;border-radius:6px"></div>
+    </div>
+
     <div class="card" id="mouseCard">
       <h2>Trackpad mouse (lizard + Xbox)</h2>
       <div class="row"><label>Sensitivity</label><input type="range" id="mDiv" min="4" max="200" step="1"><span class="val" id="mDivV"></span></div>
@@ -735,6 +760,92 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
     const o=document.createElement("option"); o.value=v; o.textContent=v+"%"+(v===200?" (default)":""); sel.appendChild(o); }
 }
 
+// ---- RF recovery / journal status ----
+let rfCapable=false, rfBusy=false, rfLastRefresh=0;
+let rfPoolChannels=new Set();
+const RF_DESIG=["unexplored","good","poor","mixed"];
+function rfChLabel(ch){ return ch ? `Ch ${ch} · ${2400+ch} MHz` : "—"; }
+function applyRfStatus(p){
+  if(!p || p.length<13 || p[0]!==1) return;
+  const flags=p[1], current=p[2], target=p[3], startup=p[4], count=p[5];
+  const writes=p[6], generation=p[7]|(p[8]<<8);
+  const seq=((p[9]|(p[10]<<8)|(p[11]<<16)|(p[12]<<24))>>>0);
+  $("#rfActiveCh").textContent=rfChLabel(current);
+  $("#rfTargetCh").textContent=target?rfChLabel(target):"none";
+  $("#rfStartupCh").textContent=rfChLabel(startup || 18);
+  $("#rfJournalSeq").textContent=String(seq);
+  $("#rfJournalWrites").textContent=String(writes);
+  const running=!!(flags&1), pending=!!(flags&2), ambient=!!(flags&4), live=!!(flags&8), handoff=!!(flags&16);
+  $("#rfSurveyState").textContent=running?"running":pending?"queued until idle":ambient?`cached #${generation}`:"not sampled";
+  $("#rfSurveyNote").textContent=live&&pending?"Survey queued; it will start after the link has been idle for 10 seconds.":running?"Sampling the progressive channel pool in small idle-only steps.":"Ambient scans run only while no controller is linked; a request made while linked is queued.";
+  const body=$("#rfJournalBody"), bars=$("#rfAmbientBars"); body.innerHTML=""; bars.innerHTML=""; rfPoolChannels=new Set();
+  for(let i=0;i<count;i++){
+    const q=13+i*9; if(q+9>p.length) break;
+    const ch=p[q], noise=p[q+1], d=p[q+2], worst=p[q+3], mean=p[q+4], conf=p[q+5], trials=p[q+6], penalty=p[q+7], recent=p[q+8];
+    rfPoolChannels.add(ch);
+    const tr=document.createElement("tr");
+    const desig=RF_DESIG[d]||("state "+d);
+    tr.innerHTML=`<td>${ch}${ch===current?' <span class="pill up">active</span>':''}${ch===target?' <span class="pill">target</span>':''}</td><td>${2400+ch}</td><td>${desig}</td><td>${trials?worst+'%':'—'}</td><td>${trials?mean+'%':'—'}</td><td>${trials?conf:'—'}</td><td>${trials}</td><td>${trials?penalty:'—'}</td><td>${noise?'-'+noise+' dBm':'—'}</td><td>${recent||'—'}</td>`;
+    const hopCell=document.createElement("td");
+    const hopBtn=document.createElement("button");
+    hopBtn.textContent=ch===current?"Active":"Hop";
+    hopBtn.disabled=ch===current||!live||handoff;
+    hopBtn.style.padding="4px 8px";
+    hopBtn.addEventListener("click",()=>manualHopRf(ch));
+    hopCell.appendChild(hopBtn);
+    const startupBtn=document.createElement("button");
+    startupBtn.textContent=ch===startup?"Startup ✓":"Startup";
+    startupBtn.disabled=ch===startup;
+    startupBtn.style.cssText="padding:4px 8px;margin-left:6px";
+    startupBtn.title="Use this channel on the next boot. This does not mark the channel good.";
+    startupBtn.addEventListener("click",()=>manualStartupRf(ch));
+    hopCell.appendChild(startupBtn);
+    tr.appendChild(hopCell);
+    body.appendChild(tr);
+    const col=document.createElement("div"); col.style.cssText="flex:1;min-width:18px;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center";
+    const h=noise?Math.max(6,Math.min(58,(noise-35)*1.15)):4;
+    col.title=noise?`Ch ${ch}: ambient peak -${noise} dBm`:`Ch ${ch}: no ambient sample`;
+    col.innerHTML=`<div style="font-size:9px;color:#8ba2c4">${noise?'-'+noise:''}</div><div style="width:100%;height:${h}px;background:currentColor;opacity:${noise?'.72':'.18'};border-radius:2px 2px 0 0"></div><div style="font-size:9px;margin-top:2px">${ch}</div>`;
+    bars.appendChild(col);
+  }
+}
+async function manualHopRf(ch){
+  if(!dev||isDongle||!rfCapable||rfBusy||!rfPoolChannels.has(ch)) return;
+  rfBusy=true;
+  try{
+    await waitIdle(); if(!dev) return;
+    await send([0x02,99,ch]);
+    const ack=await readBlob(); if(ack) applyBlob(ack);
+    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    rfLastRefresh=Date.now();
+  }catch(e){ log("RF hop err: "+e.message); }
+  finally{ rfBusy=false; }
+}
+async function manualStartupRf(ch){
+  if(!dev||isDongle||!rfCapable||rfBusy||!rfPoolChannels.has(ch)) return;
+  rfBusy=true;
+  try{
+    await waitIdle(); if(!dev) return;
+    await send([0x02,100,ch]);
+    const ack=await readBlob(); if(ack) applyBlob(ack);
+    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    rfLastRefresh=Date.now();
+  }catch(e){ log("RF startup err: "+e.message); }
+  finally{ rfBusy=false; }
+}
+async function refreshRfStatus(survey=false){
+  if(!dev||isDongle||!rfCapable||rfBusy) return;
+  rfBusy=true;
+  try{
+    await waitIdle(); if(!dev) return;
+    await send([0x02,survey?98:97,1]);
+    const ack=await readBlob(); if(ack) applyBlob(ack);
+    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    rfLastRefresh=Date.now();
+  }catch(e){ log("RF status err: "+e.message); }
+  finally{ rfBusy=false; }
+}
+
 // ---- per-slot tab state ----
 let g_activeSlot = 0;
 let g_slotData = []; // [{up, battery, rssi}] indexed by slot 0..3, only set for bonded slots
@@ -936,6 +1047,10 @@ function applyBlob(p){
   const rumbleCap=(p[0]>=21 && p.length>193);
   const rumbleScale=rumbleCap?p[51]*2:200, rumbleStyle=rumbleCap?p[193]:0;
   const rssi=(p.length>37?p[37]:0);
+  rfCapable=(p.length>179 && p[179]===0x52);
+  const rfCard=$("#rfRecoveryCard"); if(rfCard) rfCard.classList.toggle("hide", !rfCapable);
+  if(rfCapable && !rfBusy && Date.now()-rfLastRefresh>2000)
+    setTimeout(()=>refreshRfStatus(false),0);
 
   // per-slot link status (protocol v8, p.length >= 73)
   const hasSlotsData = p.length >= 73;
@@ -1169,7 +1284,7 @@ function setSlider(id,v){ const el=$("#"+id); if(document.activeElement!==el){ e
 
 let inflight=false;
 async function refresh(){
-  if(!dev||inflight||capturing||backupBusy||flightBusy||lizardBusy) return; inflight=true;
+  if(!dev||inflight||capturing||backupBusy||flightBusy||lizardBusy||rfBusy) return; inflight=true;
   // try/finally: an exception anywhere in here (applyBlob included) must never leave inflight latched true --
   // that would silently kill all future polls and read as a fake "heartbeat lost".
   try{
@@ -2308,6 +2423,8 @@ $("#rumbleTest").onclick=async()=>{ if(dev){ await send([0x16]); log("test rumbl
 $("#rumbleStyle").addEventListener("change", ()=>setField(39, +$("#rumbleStyle").value));
 $("#rumbleScale").addEventListener("change", ()=>setField(22, (+$("#rumbleScale").value)/2));
 $("#swGyroMap").addEventListener("change", ()=>setField(38, +$("#swGyroMap").value));
+$("#rfRefresh").onclick=()=>refreshRfStatus(false);
+$("#rfSurvey").onclick=()=>refreshRfStatus(true);
 for(const sel of document.querySelectorAll("select.chord")){
   sel.addEventListener("change", ()=>setField(CHORD_FIELD[+sel.dataset.i], +sel.value));
 }
