@@ -1,0 +1,120 @@
+name: F27-M1 Joy-Con 2 mouse negotiation
+
+on:
+  push:
+    branches:
+      - f27-joycon2-m1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: JoyCon2-L-M1
+            define: 1
+            label: L
+          - target: JoyCon2-R-M1
+            define: 2
+            label: R
+
+    steps:
+      - name: Check out F27-M1
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compose Makerdiary build support
+        run: |
+          set -eu
+          git fetch origin makerdiary-mdk
+          git cherry-pick --no-commit aa4a619e52be052d683ea6db1a3dd2ee96f19420
+
+      - name: Apply isolated F27 hooks
+        run: python3 tools/f27_joycon2_poc.py
+
+      - name: Apply M1 mouse-negotiation hooks
+        run: python3 tools/f27_joycon2_m1.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify experiment source
+        run: |
+          make format
+          make check
+          git diff --check
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Keep both packages intentionally unpinned, matching makerdiary-mdk.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Generate F27-M1 version header
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M1-JC${{ matrix.label }}-${short}" ./gen_version.sh
+
+      - name: Build standard F27-M1 target
+        run: |
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=${{ matrix.define }}"
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M1-${{ matrix.target }}-standard.uf2
+
+      - name: Build Makerdiary MDK F27-M1 target
+        run: |
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=${{ matrix.define }}"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M1-${{ matrix.target }}-MDK.uf2
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M1-${{ matrix.target }}.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          base_f27=7eed27fda7813289cab3a0da3468bf362d6c29a3
+          makerdiary=aa4a619e52be052d683ea6db1a3dd2ee96f19420
+          target=${{ matrix.target }}
+          define=${{ matrix.define }}
+          experiment=Joy-Con feature negotiation + native payload offset 0x08=0x38
+          unchanged=identity/report07-08/mouse delta/surface 0x17-0xFF/flat motion carrier
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-M1-${{ matrix.target }}-MDK.uf2 >> build/F27-M1-${{ matrix.target }}.manifest.txt
+
+      - name: Upload F27-M1 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M1-${{ matrix.target }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M1-${{ matrix.target }}-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M1-${{ matrix.target }}-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M1-${{ matrix.target }}.manifest.txt
