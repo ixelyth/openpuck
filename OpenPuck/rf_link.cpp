@@ -182,6 +182,7 @@ enum RfJournalBuilderFailure : uint8_t {
 	RF_JOURNAL_BUILDER_FAIL_NO_VALID_CHANNEL = 4,
 	RF_JOURNAL_BUILDER_FAIL_FINAL_HOP = 5,
 	RF_JOURNAL_BUILDER_FAIL_SAVE = 6,
+	RF_JOURNAL_BUILDER_FAIL_JOURNAL_WRITE_BUSY = 7,
 };
 
 static uint8_t g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_IDLE;
@@ -1784,10 +1785,20 @@ bool rfRecoveryRequestJournalBuilder()
 {
 	const unsigned long now = millis();
 	rfChannelHistoryEnsureLoaded();
-	if (rfJournalBuilderActive() || g_rfChHandoffState != RF_CH_IDLE ||
-	    g_rfChGroupActive || g_channelJournalJobActive) {
+	// WebUSB status can lag a successful start request. Treat a duplicate Start
+	// while this Builder already owns the workflow as an idempotent success
+	// instead of converting the in-progress run into a false BUSY failure.
+	if (rfJournalBuilderActive())
+		return true;
+	if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive) {
 		g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_FAILED;
 		g_rfJournalBuilderFailure = RF_JOURNAL_BUILDER_FAIL_BUSY;
+		return false;
+	}
+	if (g_channelJournalJobActive) {
+		g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_FAILED;
+		g_rfJournalBuilderFailure =
+			RF_JOURNAL_BUILDER_FAIL_JOURNAL_WRITE_BUSY;
 		return false;
 	}
 	const uint8_t liveMask = rfChannelLiveMask(now);

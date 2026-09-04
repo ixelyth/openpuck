@@ -277,12 +277,12 @@
         <div class="stat"><div class="k">Journal builder</div><div class="v" id="rfBuilderStatus" style="font-size:14px">Idle</div></div>
       </div>
       <div class="row" style="margin-top:10px">
-        <button id="rfRefresh">Refresh RF status</button>
-        <button id="rfSurvey" style="margin-left:8px">Survey ambient RF</button>
-        <button id="rfBuilder" style="margin-left:8px">Build RF journal</button>
+        <button id="rfRefresh">Refresh RF Status</button>
+        <button id="rfSurvey" style="margin-left:8px">Survey Ambient RF</button>
+        <button id="rfBuilder" style="margin-left:8px">Build RF Journal</button>
         <span class="note" id="rfSurveyNote" style="flex:1">An explicit survey runs immediately, even while a controller is linked; brief input jitter may occur.</span>
       </div>
-      <p class="note" style="margin-top:10px"><strong>Manual Hop:</strong> clicking Hop immediately negotiates the channel change for every live controller.<br><strong>Startup</strong> saves that channel for the next boot, and automatic RF learning may replace it later.</p>
+      <p class="note" style="margin-top:10px">Hop immediately negotiates the channel change for every live controller.<br>Build RF Journal will initiate a comprehensive 14-channel scan to build the RF Journal ahead-of-time.<br>Startup saves that channel as the starting channel for subsequent boots, but automatic RF learning may replace it later.</p>
       <div style="overflow-x:auto;margin-top:12px">
         <table style="width:100%;border-collapse:collapse;font-size:0.88em">
           <thead><tr style="text-align:left"><th>Channel</th><th>MHz</th><th>Journal</th><th>Worst</th><th>Mean</th><th>Confidence</th><th>Trials</th><th>Penalty</th><th>Ambient</th><th>Recent</th><th>Actions</th></tr></thead>
@@ -764,7 +764,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false;
 let rfHopRequestedCh=0, rfHopSawHandoff=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
@@ -799,7 +799,7 @@ function applyRfStatus(p){
   const builderBest=p.length>=builderBase+7?p[builderBase+5]:0;
   const builderFailure=p.length>=builderBase+7?p[builderBase+6]:0;
   const surveyChannel=p.length>=builderBase+8?p[builderBase+7]:0;
-  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed"];
+  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write in progress · retry shortly"];
   let builderText="Idle";
   if(builderPhase===1) builderText="Ambient survey";
   else if(builderPhase===2) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · hopping to Ch ${builderChannel}`;
@@ -816,8 +816,9 @@ function applyRfStatus(p){
   $("#rfBuilderStatus").textContent=builderText;
   rfBuilderActive=builderPhase>=1&&builderPhase<=9;
   rfBuilderSaving=builderPhase===8;
-  $("#rfBuilder").textContent=rfBuilderActive?"Cancel Journal Build":"Build RF journal";
-  $("#rfBuilder").disabled=rfBuilderSaving;
+  if(rfBuilderStartPending&&builderPhase!==0) rfBuilderStartPending=false;
+  $("#rfBuilder").textContent=rfBuilderActive?"Cancel Journal Build":rfBuilderStartPending?"Starting…":"Build RF Journal";
+  $("#rfBuilder").disabled=rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&(handoff||rfHopPending));
   $("#rfSurvey").disabled=rfBuilderActive;
   rfHandoffActive=handoff;
   rfSurveyRunning=running;
@@ -964,7 +965,7 @@ async function manualStartupRf(ch){
   finally{ rfBusy=false; }
 }
 async function manualJournalBuilderRf(){
-  if(!dev||isDongle||!rfCapable||rfBuilderSaving) return;
+  if(!dev||isDongle||!rfCapable||rfBuilderSaving||rfBuilderStartPending) return;
   if(rfBuilderActive){
     if(!confirm("Cancel the RF Journal Builder? The current safe RF operation will finish, the puck will return to the channel that was active before the build, and the existing saved journal will be preserved.")) return;
     if(!(await waitRfUiIdle())) return;
@@ -980,15 +981,44 @@ async function manualJournalBuilderRf(){
   }
   const ok=confirm("RF Journal Builder\n\nPlace all connected controllers at approximately the farthest distance from the puck at which you normally use them, and leave them in their normal operating location during the test.\n\nThe puck will survey ambient RF, test all 14 recovery channels for about 60 seconds each, select the best channel, and save one completed RF journal record. The test takes roughly 15 minutes.\n\nStart the journal build?");
   if(!ok) return;
+  rfBuilderStartPending=true;
   $("#rfBuilderStatus").textContent="Starting…";
-  if(!(await waitRfUiIdle())) return;
+  $("#rfBuilder").textContent="Starting…";
+  $("#rfBuilder").disabled=true;
+  if(!(await waitRfUiIdle())){
+    rfBuilderStartPending=false;
+    $("#rfBuilder").textContent="Build RF Journal";
+    $("#rfBuilder").disabled=rfHandoffActive||rfHopPending;
+    return;
+  }
   rfBusy=true;
+  let sawStatus=false;
   try{
     await waitIdle(); if(!dev) return;
     await send([0x02,101,1]);
-    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
-    rfLastRefresh=Date.now();
-  }catch(e){ log("RF journal builder err: "+e.message); }
+    // Latch the Start button until firmware positively reports either an
+    // active Builder phase or a terminal failure. This closes the duplicate
+    // Start window while the first RF-status response is still propagating.
+    for(let i=0;i<20&&dev&&rfBuilderStartPending;i++){
+      const p=await readFrame(0xAD,13,256);
+      if(p){ sawStatus=true; applyRfStatus(p); }
+      if(!rfBuilderStartPending) break;
+      await new Promise(resolve=>setTimeout(resolve,100));
+      await send([0x02,97,1]);
+    }
+    if(rfBuilderStartPending){
+      rfBuilderStartPending=false;
+      $("#rfBuilderStatus").textContent=sawStatus?"Start outcome unknown · refresh RF status":"Start status unavailable · refresh RF status";
+      $("#rfBuilder").textContent="Build RF Journal";
+      $("#rfBuilder").disabled=rfHandoffActive||rfHopPending;
+    }
+    if(sawStatus) rfLastRefresh=Date.now();
+  }catch(e){
+    rfBuilderStartPending=false;
+    $("#rfBuilder").textContent="Build RF Journal";
+    $("#rfBuilder").disabled=rfHandoffActive||rfHopPending;
+    log("RF journal builder err: "+e.message);
+  }
   finally{ rfBusy=false; }
 }
 async function manualSurveyRf(){
