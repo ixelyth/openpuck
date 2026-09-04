@@ -25,6 +25,15 @@ static inline void le16(uint8_t *p, int16_t v)
 // and 0x05 (DualSense) -- identical layout; the caller returns size-1 and leaves trailing bytes zero.
 void psNeutralCalib(uint8_t *buf);
 
+// Shared Steam-controller -> Sony sensor coordinate transform.
+// Gyro and accelerometer use the same signed permutation for coherent fusion.
+struct PsImuFrame {
+	int16_t gx, gy, gz;
+	int16_t ax, ay, az;
+};
+PsImuFrame psImuFromSteam(const PuckInput &in);
+void psPadClickEdge(uint8_t slot, bool pressed);
+
 // Steam trackpad s16 coords -> absolute touch surface. TOUCH_PAD_W is split into left/right halves so both
 // pads can co-exist as two contacts on a single DualSense/DS4 touchpad.
 #define TOUCH_PAD_W 1920u
