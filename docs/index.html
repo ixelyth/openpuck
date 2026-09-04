@@ -764,7 +764,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfHandoffPhase=0, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false;
 let rfHopRequestedCh=0, rfHopSawHandoff=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
@@ -816,11 +816,12 @@ function applyRfStatus(p){
   $("#rfBuilderStatus").textContent=builderText;
   rfBuilderActive=builderPhase>=1&&builderPhase<=9;
   rfBuilderSaving=builderPhase===8;
+  rfHandoffActive=handoff;
+  rfHandoffPhase=hopPhase;
   if(rfBuilderStartPending&&builderPhase!==0) rfBuilderStartPending=false;
   $("#rfBuilder").textContent=rfBuilderActive?"Cancel Journal Build":rfBuilderStartPending?"Starting…":"Build RF Journal";
-  $("#rfBuilder").disabled=rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&(handoff||rfHopPending));
+  syncRfBuilderDisabled();
   $("#rfSurvey").disabled=rfBuilderActive;
-  rfHandoffActive=handoff;
   rfSurveyRunning=running;
   rfSurveyPending=pending;
   rfSurveyGeneration=generation;
@@ -860,6 +861,15 @@ function applyRfStatus(p){
     bars.appendChild(col);
   }
 }
+function rfBuilderWorkflowBlocked(){
+  // Waiting-for-neutral is the automatic, pre-E4 admission phase. Firmware can
+  // safely yield that phase to an explicit Builder request; every other live
+  // handoff phase remains non-preemptible.
+  return (rfHandoffActive||rfHopPending) && !(rfHandoffActive&&rfHandoffPhase===1);
+}
+function syncRfBuilderDisabled(){
+  $("#rfBuilder").disabled=rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&rfBuilderWorkflowBlocked());
+}
 function setRfHopButtonsDisabled(disabled){
   rfHopPending=!!disabled;
   for(const tr of $("#rfJournalBody").querySelectorAll("tr")){
@@ -870,7 +880,7 @@ function setRfHopButtonsDisabled(disabled){
   // as firmware handoff state. The terminal status frame arrives before the
   // manual-Hop finally block releases rfHopPending, so applyRfStatus() may have
   // left this DOM button disabled using the old latch value.
-  $("#rfBuilder").disabled=rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&(rfHandoffActive||rfHopPending));
+  syncRfBuilderDisabled();
 }
 function showRfHopTarget(ch){
   $("#rfTargetCh").textContent=rfChLabel(ch);
@@ -993,7 +1003,7 @@ async function manualJournalBuilderRf(){
   if(!(await waitRfUiIdle())){
     rfBuilderStartPending=false;
     $("#rfBuilder").textContent="Build RF Journal";
-    $("#rfBuilder").disabled=rfHandoffActive||rfHopPending;
+    syncRfBuilderDisabled();
     return;
   }
   rfBusy=true;
@@ -1015,13 +1025,13 @@ async function manualJournalBuilderRf(){
       rfBuilderStartPending=false;
       $("#rfBuilderStatus").textContent=sawStatus?"Start outcome unknown · refresh RF status":"Start status unavailable · refresh RF status";
       $("#rfBuilder").textContent="Build RF Journal";
-      $("#rfBuilder").disabled=rfHandoffActive||rfHopPending;
+      syncRfBuilderDisabled();
     }
     if(sawStatus) rfLastRefresh=Date.now();
   }catch(e){
     rfBuilderStartPending=false;
     $("#rfBuilder").textContent="Build RF Journal";
-    $("#rfBuilder").disabled=rfHandoffActive||rfHopPending;
+    syncRfBuilderDisabled();
     log("RF journal builder err: "+e.message);
   }
   finally{ rfBusy=false; }

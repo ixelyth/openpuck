@@ -209,6 +209,7 @@ static uint8_t g_rfJournalBuilderBadWindows[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
 
 static void rfLinkQualityResetWindow(int slot);
 static void rfChannelEvidenceSyncResidence();
+static void rfChannelGroupAbort();
 static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 				unsigned long now, bool manualImmediate);
 
@@ -1790,6 +1791,16 @@ bool rfRecoveryRequestJournalBuilder()
 	// instead of converting the in-progress run into a false BUSY failure.
 	if (rfJournalBuilderActive())
 		return true;
+
+	// An explicit Builder request may supersede only an automatic recovery
+	// that is still waiting for its activity/neutral admission proof. No E4
+	// authorization has been sent and the session channel has not changed in
+	// RF_GROUP_HOP_PENDING, so aborting that automatic request is safe. Never
+	// preempt a manual hop or any handoff that has advanced past authorization.
+	if (g_rfChGroupActive && g_rfChGroupPhase == RF_GROUP_HOP_PENDING &&
+	    !g_rfChHandoffManualImmediate)
+		rfChannelGroupAbort();
+
 	if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive) {
 		g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_FAILED;
 		g_rfJournalBuilderFailure = RF_JOURNAL_BUILDER_FAIL_BUSY;
