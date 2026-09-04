@@ -1407,11 +1407,11 @@ static void rfChannelJournalStep(uint32_t now, uint8_t liveMask)
 		rfChannelJournalFinishWrite(now);
 }
 
-// Journal Builder owns the RF workflow after all measurements and the final hop
-// have completed. Drain its pre-erased append record in one bounded gap instead
-// of using the passive writer's live rate-shaping. That passive path deliberately
-// latches off after a slow live word; applying that latch here could strand the
-// user-invoked Builder in Saving forever. No page erase is performed here.
+// Explicit Journal Builder actions may finish an already-started, pre-erased
+// append record in one bounded gap: once at admission to clear a passive job
+// that cannot advance live, and again for Builder's own final save. The passive
+// path deliberately latches off after a slow live word; applying that latch here
+// would deadlock a user-invoked Builder. No page erase is performed here.
 static void rfChannelJournalDrainBuilderWrite(uint32_t now)
 {
 	if (!g_channelJournalJobActive || g_rfChHandoffState != RF_CH_IDLE ||
@@ -1606,6 +1606,13 @@ static void rfChannelHistoryMaybeCheckpoint(uint32_t now)
 	if (g_channelHistoryPersistentLastWriteMs &&
 	    (uint32_t)(now - g_channelHistoryPersistentLastWriteMs) <
 		    RF_CHANNEL_HISTORY_PERSIST_MIN_INTERVAL_MS)
+		return;
+	// Once live word programming has failed the conservative stall budget,
+	// do not create another passive job that cannot advance until the cohort
+	// goes offline. Leaving such a job active would block the explicit Journal
+	// Builder, which itself requires a live controller.
+	if (liveMask && (g_channelJournalLiveWriteUnsafe ||
+			 g_channelJournalSoftDeviceEnabled))
 		return;
 	if (g_channelJournalFreeSlot < 0 &&
 	    !rfChannelJournalMaybeCollect(now, liveMask))
@@ -1806,6 +1813,11 @@ bool rfRecoveryRequestJournalBuilder()
 		g_rfJournalBuilderFailure = RF_JOURNAL_BUILDER_FAIL_BUSY;
 		return false;
 	}
+	// Builder requires a live cohort, while an unsafe passive journal job only
+	// resumes after that cohort disappears. Resolve that otherwise-impossible
+	// admission state by finishing the already-started append record here.
+	if (g_channelJournalJobActive)
+		rfChannelJournalDrainBuilderWrite(now);
 	if (g_channelJournalJobActive) {
 		g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_FAILED;
 		g_rfJournalBuilderFailure =

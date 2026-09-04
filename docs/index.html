@@ -799,7 +799,7 @@ function applyRfStatus(p){
   const builderBest=p.length>=builderBase+7?p[builderBase+5]:0;
   const builderFailure=p.length>=builderBase+7?p[builderBase+6]:0;
   const surveyChannel=p.length>=builderBase+8?p[builderBase+7]:0;
-  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write in progress · retry shortly"];
+  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write could not be completed"];
   let builderText="Idle";
   if(builderPhase===1) builderText="Ambient survey";
   else if(builderPhase===2) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · hopping to Ch ${builderChannel}`;
