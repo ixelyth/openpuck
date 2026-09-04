@@ -898,7 +898,7 @@ bool switch2ProVendorControlXfer(uint8_t rhport, uint8_t stage,
 	memcpy(g_sw2ControlReply, SW2_VENDOR_PROTOCOL,
 	       sizeof SW2_VENDOR_PROTOCOL);
 	return tud_control_xfer(rhport, request, g_sw2ControlReply,
-					sizeof SW2_VENDOR_PROTOCOL);
+				sizeof SW2_VENDOR_PROTOCOL);
 }
 
 static void sw2DriverInit(void)
