@@ -965,6 +965,10 @@ void webusbPoll()
 
 				// every settable field persists (poll rate is no longer settable)
 				bool persist = true;
+				// RF controls (97..101) use the dedicated 0xAD reply only. Scheduling
+				// the generic 0xA5 blob as well lets the SOF drain expose either frame
+				// first and phase-shifts the browser's shared bulk-IN stream.
+				const bool rfStatusOnly = f >= 97u && f <= 101u;
 				// per-type cfg writes (protocol v10/v17): field = 40 + et*9 + k, k: 0..3 back, 4 qam, 5 abSwap,
 				// 6 padHaptics, 7 ledBright, 8 rumble. Edits g_type[et]; refresh the live mirrors if it's the active type.
 				if (f >= 40 && f < 40 + ET_COUNT * 9) {
@@ -1196,7 +1200,8 @@ void webusbPoll()
 				}
 				if (persist)
 					saveCfg();
-				g_blobRequest = true;
+				if (!rfStatusOnly)
+					g_blobRequest = true;
 			} else if (op == 0x03) {
 				uint8_t m = buf[1];
 				if (modeValid(m) && !USBDevice.suspended()) {

@@ -920,7 +920,6 @@ async function manualHopRf(ch){
   try{
     await waitIdle(); if(!dev) return;
     await send([0x02,99,ch]);
-    const ack=await readBlob(); if(ack) applyBlob(ack);
     let p=await readFrame(0xAD,13,256), sawStatus=!!p, lastActive=false;
     // Firmware's longest normal rollback path is longer than a simple clean
     // acquisition, and USB/browser scheduling adds jitter. Follow firmware
@@ -952,7 +951,6 @@ async function manualHopRf(ch){
       }
       await new Promise(resolve=>setTimeout(resolve,100));
       await send([0x02,97,1]);
-      const statusAck=await readBlob(); if(statusAck) applyBlob(statusAck);
       p=await readFrame(0xAD,13,256);
     }
     if(!terminal){
@@ -978,7 +976,6 @@ async function manualStartupRf(ch){
   try{
     await waitIdle(); if(!dev) return;
     await send([0x02,100,ch]);
-    const ack=await readBlob(); if(ack) applyBlob(ack);
     const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
     rfLastRefresh=Date.now();
   }catch(e){ log("RF startup err: "+e.message); }
@@ -1056,8 +1053,8 @@ async function manualSurveyRf(){
     // The scanner advances every 100 ms. While this explicit survey owns the
     // vendor endpoint, poll RF status faster than that so pending->running and
     // each sampled channel can be painted instead of aliasing against the
-    // normal 600-ms panel poll. readFrame scans a whole USB transfer for 0xAD,
-    // so a coalesced generic 0xA5 ack cannot hide the RF status frame.
+    // normal 600-ms panel poll. RF control fields reply only with 0xAD, so the
+    // shared bulk-IN stream cannot phase-shift against a generic 0xA5 acknowledgement.
     for(let i=0;i<300&&dev;i++){
       const p=await readFrame(0xAD,13,256);
       if(p){
@@ -1088,7 +1085,6 @@ async function refreshRfStatus(survey=false){
   try{
     await waitIdle(); if(!dev) return;
     await send([0x02,survey?98:97,1]);
-    const ack=await readBlob(); if(ack) applyBlob(ack);
     const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
     rfLastRefresh=Date.now();
   }catch(e){ log("RF status err: "+e.message); }
