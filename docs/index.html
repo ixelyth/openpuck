@@ -260,7 +260,7 @@
       </div>
       <div class="row debugonly" style="margin:10px 0 0;border-top:1px solid #272d3d;padding-top:14px"><button id="stabBtn">Test stability</button>
         <span class="v" id="stabStatus" style="flex:0 0 auto;min-width:120px">—</span>
-        <span class="note" style="flex:1">Buzzes the controllers every 10 s (keeps them awake) and times how long the puck stays up. On a reset it records the uptime and shows it by <em>Last reset</em>; it auto-resumes after the puck reconnects. The count is kept in this tab (a page refresh clears it).</span>
+        <span class="note" style="flex:1">Buzzes the controllers every 10 s and times how long the puck stays up. On a reset it records the uptime and shows it by <em>Last reset</em>; it auto-resumes after the puck reconnects. The count is kept in this tab (a page refresh clears it).</span>
       </div>
     </div>
 
@@ -275,6 +275,7 @@
         <div class="stat"><div class="k">Journal writes this boot</div><div class="v" id="rfJournalWrites">—</div></div>
         <div class="stat"><div class="k">Handoff status</div><div class="v" id="rfHandoffStatus" style="font-size:14px">Idle</div></div>
         <div class="stat"><div class="k">Journal builder</div><div class="v" id="rfBuilderStatus" style="font-size:14px">Idle</div></div>
+        <div class="stat"><div class="k">Idle timeout test</div><div class="v" id="rfIdleStatus" style="font-size:14px">Not read</div></div>
       </div>
       <div class="row" style="margin-top:10px">
         <button id="rfRefresh">Refresh RF Status</button>
@@ -283,6 +284,12 @@
         <span class="note" id="rfSurveyNote" style="flex:1">An explicit survey runs immediately, even while a controller is linked; brief input jitter may occur.</span>
       </div>
       <p class="note" style="margin-top:10px"><strong>Hop</strong> immediately negotiates the channel change for every live controller.<br><strong>Build RF Journal</strong> will initiate a comprehensive 14-channel scan to build the RF Journal ahead of time.<br><strong>Startup</strong> saves that channel as the starting channel for subsequent boots, but automatic RF learning may replace it later.</p>
+      <div class="row" style="margin-top:10px;border-top:1px solid #272d3d;padding-top:12px">
+        <button id="rfIdleRead">Read Idle Timeout</button>
+        <button id="rfIdleSame" style="margin-left:8px">Test Same Value · 10 min</button>
+        <button id="rfIdlePlus" style="margin-left:8px">Test +1 s · 10 min</button>
+      </div>
+      <p class="note" id="rfIdleNote" style="margin-top:6px"><strong>Test only:</strong> captures every live controller independently. Read confirms setting 50 for each live controller first. Each 10-minute test then pulses once per minute; Same re-sends the exact captured timeout, while +1 s briefly sends captured+1 second and immediately restores the captured value. These tests are not used by RF Journal Builder.</p>
       <div style="overflow-x:auto;margin-top:12px">
         <table style="width:100%;border-collapse:collapse;font-size:0.88em">
           <thead><tr style="text-align:left"><th>Channel</th><th>MHz</th><th>Journal</th><th>Worst</th><th>Mean</th><th>Confidence</th><th>Trials</th><th>Penalty</th><th>Ambient</th><th>Recent</th><th>Actions</th></tr></thead>
@@ -764,7 +771,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfHandoffPhase=0, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfHandoffPhase=0, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false, rfIdleTestBusy=false, rfIdleTestMode=0;
 let rfHopRequestedCh=0, rfHopSawHandoff=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
@@ -799,6 +806,17 @@ function applyRfStatus(p){
   const builderBest=p.length>=builderBase+7?p[builderBase+5]:0;
   const builderFailure=p.length>=builderBase+7?p[builderBase+6]:0;
   const surveyChannel=p.length>=builderBase+8?p[builderBase+7]:0;
+  const idleBase=builderBase+8;
+  const idleMode=p.length>=idleBase+17?p[idleBase]:0;
+  const idleFlags=p.length>=idleBase+17?p[idleBase+1]:0;
+  const idleValidMask=p.length>=idleBase+17?p[idleBase+2]:0;
+  const idleValues=[0,0,0,0];
+  if(p.length>=idleBase+17) for(let s=0;s<4;s++) idleValues[s]=p[idleBase+3+s*2]|(p[idleBase+4+s*2]<<8);
+  const idleElapsed=p.length>=idleBase+17?(p[idleBase+11]|(p[idleBase+12]<<8)):0;
+  const idlePulses=p.length>=idleBase+17?p[idleBase+13]:0;
+  const idleMask=p.length>=idleBase+17?p[idleBase+14]:0;
+  const idleOfflineMask=p.length>=idleBase+17?p[idleBase+15]:0;
+  const idleFailure=p.length>=idleBase+17?p[idleBase+16]:0;
   const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write could not be completed"];
   let builderText="Idle";
   if(builderPhase===1) builderText="Ambient survey";
@@ -814,6 +832,33 @@ function applyRfStatus(p){
   else if(builderPhase===11) builderText="Canceled";
   else if(builderPhase===12) builderText=`Failed · ${builderFailureText[builderFailure]||("code "+builderFailure)}`;
   $("#rfBuilderStatus").textContent=builderText;
+  const idleComplete=(idleFlags&2)!==0;
+  const idleFailureText=["","no live controllers","RF workflow busy","could not read setting 50 from every live controller","at least one controller has idle timeout disabled (0 s)"];
+  const idleValueFmt=v=>v?`${v} s (${Math.floor(v/60)}:${String(v%60).padStart(2,"0")})`:`${v} s`;
+  const idleValueParts=[];
+  for(let s=0;s<4;s++) if(idleMask&(1<<s)){
+    const value=(idleValidMask&(1<<s))?idleValueFmt(idleValues[s]):"reading…";
+    const state=(idleOfflineMask&(1<<s))?" · OFFLINE":"";
+    idleValueParts.push(`Slot ${s+1}: ${value}${state}`);
+  }
+  const idleValueText=idleValueParts.length?idleValueParts.join(" · "):"—";
+  let idleText="Not read";
+  if(idleFailure) idleText=`Failed · ${idleFailureText[idleFailure]||("code "+idleFailure)}`;
+  else if(idleMode===1) idleText=idleComplete?`Read · ${idleValueText}`:`Reading setting 50 · ${idleValueText}`;
+  else if(idleMode===2||idleMode===3){
+    const label=idleMode===2?"Same":"+1 s";
+    if(!(idleFlags&1)) idleText=`${label} · reading baselines · ${idleValueText}`;
+    else if(idleComplete) idleText=`${label} complete · ${idleValueText} · ${idlePulses} pulses`;
+    else idleText=`${label} · ${idleValueText} · ${Math.floor(idleElapsed/60)}:${String(idleElapsed%60).padStart(2,"0")}/10:00 · ${idlePulses} pulses`;
+  }
+  $("#rfIdleStatus").textContent=idleText;
+  rfIdleTestMode=idleMode;
+  rfIdleTestBusy=idleMode!==0&&!idleComplete&&!idleFailure;
+  $("#rfIdleRead").disabled=rfIdleTestBusy;
+  $("#rfIdleSame").textContent=(rfIdleTestBusy&&idleMode===2)?"Stop Same Test":"Test Same Value · 10 min";
+  $("#rfIdlePlus").textContent=(rfIdleTestBusy&&idleMode===3)?"Stop +1 s Test":"Test +1 s · 10 min";
+  $("#rfIdleSame").disabled=rfIdleTestBusy&&idleMode!==2;
+  $("#rfIdlePlus").disabled=rfIdleTestBusy&&idleMode!==3;
   rfBuilderActive=builderPhase>=1&&builderPhase<=9;
   rfBuilderSaving=builderPhase===8;
   rfHandoffActive=handoff;
@@ -821,7 +866,7 @@ function applyRfStatus(p){
   if(rfBuilderStartPending&&builderPhase!==0) rfBuilderStartPending=false;
   $("#rfBuilder").textContent=rfBuilderActive?"Cancel Journal Build":rfBuilderStartPending?"Starting…":"Build RF Journal";
   syncRfBuilderDisabled();
-  $("#rfSurvey").disabled=rfBuilderActive;
+  $("#rfSurvey").disabled=rfBuilderActive||rfIdleTestBusy;
   rfSurveyRunning=running;
   rfSurveyPending=pending;
   rfSurveyGeneration=generation;
@@ -862,12 +907,14 @@ function applyRfStatus(p){
   }
 }
 function rfBuilderWorkflowBlocked(){
+  if(rfIdleTestBusy) return true;
   // Waiting-for-neutral is the automatic, pre-E4 admission phase. Firmware can
   // safely yield that phase to an explicit Builder request; every other live
   // handoff phase remains non-preemptible.
   return (rfHandoffActive||rfHopPending) && !(rfHandoffActive&&rfHandoffPhase===1);
 }
 function rfManualHopWorkflowBlocked(){
+  if(rfIdleTestBusy) return true;
   // An explicit manual hop may also replace automatic Waiting-for-neutral.
   // Manual authorization and every post-E4 phase remain non-preemptible.
   return rfHandoffActive&&rfHandoffPhase!==1;
@@ -1088,6 +1135,19 @@ async function refreshRfStatus(survey=false){
     const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
     rfLastRefresh=Date.now();
   }catch(e){ log("RF status err: "+e.message); }
+  finally{ rfBusy=false; }
+}
+
+async function rfIdleTestAction(field){
+  if(!dev||isDongle||!rfCapable||rfBusy) return;
+  const stopping=rfIdleTestBusy&&((field===103&&rfIdleTestMode===2)||(field===104&&rfIdleTestMode===3));
+  rfBusy=true;
+  try{
+    await waitIdle(); if(!dev) return;
+    await send([0x02,field,stopping?0:1]);
+    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    rfLastRefresh=Date.now();
+  }catch(e){ log("RF idle timeout test err: "+e.message); }
   finally{ rfBusy=false; }
 }
 
@@ -2671,6 +2731,9 @@ $("#swGyroMap").addEventListener("change", ()=>setField(38, +$("#swGyroMap").val
 $("#rfRefresh").onclick=()=>refreshRfStatus(false);
 $("#rfSurvey").onclick=()=>manualSurveyRf();
 $("#rfBuilder").onclick=()=>manualJournalBuilderRf();
+$("#rfIdleRead").onclick=()=>rfIdleTestAction(102);
+$("#rfIdleSame").onclick=()=>rfIdleTestAction(103);
+$("#rfIdlePlus").onclick=()=>rfIdleTestAction(104);
 for(const sel of document.querySelectorAll("select.chord")){
   sel.addEventListener("change", ()=>setField(CHORD_FIELD[+sel.dataset.i], +sel.value));
 }

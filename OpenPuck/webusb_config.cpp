@@ -482,8 +482,9 @@ static bool webusbSendRfStatus()
 	rfRecoveryStatusSnapshot(&status);
 	// Append-only trailers after the counted channel rows preserve the v1
 	// header/row offsets: 4 bytes handoff telemetry + 7 bytes journal-builder
-	// status + 1 byte ambient-survey progress.
-	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1];
+	// status + 1 byte ambient-survey progress + 17 bytes idle-timeout test.
+	static uint8_t
+		f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 + 17];
 	uint8_t *q = f + 2;
 	f[0] = 0xAD;
 	f[1] = (uint8_t)(sizeof f - 2u);
@@ -524,6 +525,19 @@ static bool webusbSendRfStatus()
 	*q++ = status.journalBuilderBestChannel;
 	*q++ = status.journalBuilderFailure;
 	*q++ = status.ambientSurveyChannel;
+	*q++ = status.idleTestMode;
+	*q++ = status.idleTestFlags;
+	*q++ = status.idleTestValueValidMask;
+	for (uint8_t s = 0; s < NSLOT; s++) {
+		*q++ = (uint8_t)status.idleTestValueSeconds[s];
+		*q++ = (uint8_t)(status.idleTestValueSeconds[s] >> 8);
+	}
+	*q++ = (uint8_t)status.idleTestElapsedSeconds;
+	*q++ = (uint8_t)(status.idleTestElapsedSeconds >> 8);
+	*q++ = status.idleTestPulseCount;
+	*q++ = status.idleTestParticipantMask;
+	*q++ = status.idleTestOfflineMask;
+	*q++ = status.idleTestFailure;
 	if (tud_vendor_write_available() < sizeof f)
 		return false;
 	usb_web.write(f, sizeof f);
@@ -965,10 +979,10 @@ void webusbPoll()
 
 				// every settable field persists (poll rate is no longer settable)
 				bool persist = true;
-				// RF controls (97..101) use the dedicated 0xAD reply only. Scheduling
+				// RF controls (97..104) use the dedicated 0xAD reply only. Scheduling
 				// the generic 0xA5 blob as well lets the SOF drain expose either frame
 				// first and phase-shifts the browser's shared bulk-IN stream.
-				const bool rfStatusOnly = f >= 97u && f <= 101u;
+				const bool rfStatusOnly = f >= 97u && f <= 104u;
 				// per-type cfg writes (protocol v10/v17): field = 40 + et*9 + k, k: 0..3 back, 4 qam, 5 abSwap,
 				// 6 padHaptics, 7 ledBright, 8 rumble. Edits g_type[et]; refresh the live mirrors if it's the active type.
 				if (f >= 40 && f < 40 + ET_COUNT * 9) {
@@ -1173,6 +1187,29 @@ void webusbPoll()
 						(void)rfRecoveryRequestJournalBuilder();
 					else
 						rfRecoveryCancelJournalBuilder();
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				case 102:
+					(void)rfRecoveryRequestIdleTimeoutRead();
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				case 103:
+					if (v)
+						(void)rfRecoveryRequestIdleTimeoutTest(
+							false);
+					else
+						rfRecoveryCancelIdleTimeoutTest();
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				case 104:
+					if (v)
+						(void)rfRecoveryRequestIdleTimeoutTest(
+							true);
+					else
+						rfRecoveryCancelIdleTimeoutTest();
 					g_rfStatusRequest = true;
 					persist = false;
 					break;
