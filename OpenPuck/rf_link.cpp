@@ -151,6 +151,7 @@ static unsigned long g_channelHistoryPersistentLastWriteMs = 0;
 #define RF_AMBIENT_SURVEY_SAMPLE_US 1200u
 #define RF_AMBIENT_SURVEY_STEP_MS 100u
 #define RF_AMBIENT_SURVEY_IDLE_GUARD_MS 10000u
+#define RF_AMBIENT_SURVEY_POST_HOP_GUARD_MS 30000u
 #define RF_AMBIENT_SURVEY_REFRESH_MS 60000u
 static uint8_t g_ambientStableRssi[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
 static uint8_t g_ambientWorkRssi[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
@@ -839,6 +840,17 @@ static void rfAmbientSurveyTask()
 			if (g_ambientSurveyManual)
 				g_ambientSurveyPending = true;
 		}
+		return;
+	}
+	// Automatic ambient scanning must not compete with post-hop reacquisition.
+	// Explicit Survey and Builder surveys set g_ambientSurveyManual and bypass
+	// this grace deliberately. The existing idle guard starts only afterward.
+	if (!g_ambientSurveyManual && g_qosLastHopMs &&
+	    (uint32_t)(now - g_qosLastHopMs) <
+		    RF_AMBIENT_SURVEY_POST_HOP_GUARD_MS) {
+		g_ambientSurveyIdleSinceMs = 0;
+		if (g_ambientSurveyRunning)
+			rfAmbientSurveyAbort();
 		return;
 	}
 	if (live && !g_ambientSurveyManual) {
@@ -2937,6 +2949,13 @@ bool rfRecoveryRequestManualHop(uint8_t channel)
 		rfChannelGroupAbort();
 	if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
 		return false;
+
+	// An accepted manual hop owns the radio over any standalone ambient survey.
+	// Builder cannot reach this path, so its intentional survey remains protected.
+	if (g_ambientSurveyRunning)
+		rfAmbientSurveyAbort();
+	g_ambientSurveyPending = false;
+	g_ambientSurveyManual = false;
 
 	const unsigned long now = millis();
 	// Manual selection starts a fresh QoS residence. Disarm any stale automatic
