@@ -167,6 +167,65 @@ static unsigned long g_ambientSurveyIdleSinceMs = 0;
 static unsigned long g_ambientSurveyLastStepMs = 0;
 static unsigned long g_ambientSurveyLastCompleteMs = 0;
 
+#define RF_JOURNAL_BUILDER_WINDOWS 60u
+#define RF_JOURNAL_BUILDER_SETTLE_MS 2000u
+#define RF_JOURNAL_BUILDER_BETWEEN_MS 400u
+#define RF_JOURNAL_BUILDER_RECONNECT_STABLE_MS 1000u
+#define RF_JOURNAL_BUILDER_HOP_ATTEMPTS 2u
+
+enum RfJournalBuilderFailure : uint8_t {
+	RF_JOURNAL_BUILDER_FAIL_NONE = 0,
+	RF_JOURNAL_BUILDER_FAIL_NO_CONTROLLERS = 1,
+	RF_JOURNAL_BUILDER_FAIL_BUSY = 2,
+	RF_JOURNAL_BUILDER_FAIL_JOURNAL_FULL = 3,
+	RF_JOURNAL_BUILDER_FAIL_NO_VALID_CHANNEL = 4,
+	RF_JOURNAL_BUILDER_FAIL_FINAL_HOP = 5,
+	RF_JOURNAL_BUILDER_FAIL_SAVE = 6,
+};
+
+static uint8_t g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_IDLE;
+static uint8_t g_rfJournalBuilderResumePhase = RF_JOURNAL_BUILDER_IDLE;
+static uint8_t g_rfJournalBuilderParticipants = 0;
+static uint8_t g_rfJournalBuilderOriginChannel = 0;
+static uint8_t g_rfJournalBuilderIndex = 0;
+static uint8_t g_rfJournalBuilderChannel = 0;
+static uint8_t g_rfJournalBuilderBestChannel = 0;
+static uint8_t g_rfJournalBuilderFailure = RF_JOURNAL_BUILDER_FAIL_NONE;
+static uint8_t g_rfJournalBuilderHopAttempts = 0;
+static uint16_t g_rfJournalBuilderSurveyGeneration = 0;
+static unsigned long g_rfJournalBuilderPhaseMs = 0;
+static unsigned long g_rfJournalBuilderCohortStableMs = 0;
+static bool g_rfJournalBuilderCancelRequested = false;
+static bool g_rfJournalBuilderPromoted = false;
+static uint16_t
+	g_rfJournalBuilderWorstPermille[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
+static uint32_t
+	g_rfJournalBuilderMeanSumPermille[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
+static uint8_t
+	g_rfJournalBuilderValidWindows[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
+static uint8_t g_rfJournalBuilderBadWindows[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
+
+static void rfLinkQualityResetWindow(int slot);
+static void rfChannelEvidenceSyncResidence();
+static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
+				unsigned long now, bool manualImmediate);
+
+static bool rfJournalBuilderActive()
+{
+	return g_rfJournalBuilderPhase >= RF_JOURNAL_BUILDER_SURVEY &&
+	       g_rfJournalBuilderPhase <= RF_JOURNAL_BUILDER_PAUSED;
+}
+
+static void rfJournalBuilderResetQualityWindows()
+{
+	for (int s = 0; s < NSLOT; s++) {
+		rfLinkQualityResetWindow(s);
+		g_linkQualityBadStreak[s] = 0;
+	}
+	g_linkQualityCheckMs = millis();
+	g_qosCheckMs = g_linkQualityCheckMs;
+}
+
 // Reserve two complete, page-aligned application-flash pages. The linker maps
 // .rodata.* only inside application FLASH, whose upper bound is the InternalFS
 // start (0xED000 on nRF52840). Therefore these pages cannot alias LittleFS or
@@ -266,6 +325,7 @@ static uint8_t g_startupPersistWrites = 0u;
 
 static void
 rfStartupChannelMaybePersist(const RfStartupChannelObservation &observation);
+static void rfLinkQualityResetWindow(int slot);
 
 #define RF_CHANNEL_HANDOFF_QUIESCENT_MS 250u
 #define RF_CHANNEL_HANDOFF_STICK_DEADZONE 2048
@@ -721,6 +781,14 @@ static uint8_t rfAmbientMeasureChannel(uint8_t ch, uint16_t sampleUs)
 
 void rfRecoveryRequestAmbientSurvey()
 {
+	if (rfJournalBuilderActive())
+		return;
+	g_ambientSurveyManual = true;
+	g_ambientSurveyPending = true;
+}
+
+static void rfJournalBuilderRequestAmbientSurvey()
+{
 	g_ambientSurveyManual = true;
 	g_ambientSurveyPending = true;
 }
@@ -984,6 +1052,16 @@ void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 		status->handoffElapsedMs =
 			elapsed > 0xFFFFu ? 0xFFFFu : (uint16_t)elapsed;
 	}
+	status->journalBuilderPhase = g_rfJournalBuilderPhase;
+	status->journalBuilderIndex = g_rfJournalBuilderIndex;
+	status->journalBuilderChannel = g_rfJournalBuilderChannel;
+	status->journalBuilderProgress =
+		g_rfJournalBuilderIndex < RF_CHANNEL_HISTORY_POOL_COUNT ?
+			g_rfJournalBuilderValidWindows[g_rfJournalBuilderIndex] :
+			0u;
+	status->journalBuilderParticipantMask = g_rfJournalBuilderParticipants;
+	status->journalBuilderBestChannel = g_rfJournalBuilderBestChannel;
+	status->journalBuilderFailure = g_rfJournalBuilderFailure;
 	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++) {
 		RfChannelStatusEntry &entry = status->channel[i];
 		entry.channel = g_recoveryChannelPool[i];
@@ -1491,6 +1569,433 @@ static void rfChannelHistoryMaybeCheckpoint(uint32_t now)
 	rfChannelJournalStep(now, liveMask);
 }
 
+static void rfJournalBuilderResetChannel(uint8_t index)
+{
+	if (index >= RF_CHANNEL_HISTORY_POOL_COUNT)
+		return;
+	g_rfJournalBuilderWorstPermille[index] = 1000u;
+	g_rfJournalBuilderMeanSumPermille[index] = 0;
+	g_rfJournalBuilderValidWindows[index] = 0;
+	g_rfJournalBuilderBadWindows[index] = 0;
+}
+
+static void rfJournalBuilderResetAll()
+{
+	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++)
+		rfJournalBuilderResetChannel(i);
+	g_rfJournalBuilderIndex = 0;
+	g_rfJournalBuilderChannel = 0;
+	g_rfJournalBuilderBestChannel = 0;
+	g_rfJournalBuilderFailure = RF_JOURNAL_BUILDER_FAIL_NONE;
+	g_rfJournalBuilderHopAttempts = 0;
+	g_rfJournalBuilderPromoted = false;
+	g_rfJournalBuilderCancelRequested = false;
+}
+
+static void rfJournalBuilderSetPhase(uint8_t phase, unsigned long now)
+{
+	g_rfJournalBuilderPhase = phase;
+	g_rfJournalBuilderPhaseMs = now;
+}
+
+static void rfJournalBuilderObserveWindow(uint8_t ch, uint16_t worstPermille,
+					  uint16_t meanPermille, bool valid)
+{
+	if (g_rfJournalBuilderPhase != RF_JOURNAL_BUILDER_MEASURING ||
+	    g_rfJournalBuilderIndex >= RF_CHANNEL_HISTORY_POOL_COUNT ||
+	    ch != g_rfJournalBuilderChannel || !valid)
+		return;
+	const uint8_t i = g_rfJournalBuilderIndex;
+	if (g_rfJournalBuilderValidWindows[i] >= RF_JOURNAL_BUILDER_WINDOWS)
+		return;
+	if (worstPermille < g_rfJournalBuilderWorstPermille[i])
+		g_rfJournalBuilderWorstPermille[i] = worstPermille;
+	g_rfJournalBuilderMeanSumPermille[i] += meanPermille;
+	g_rfJournalBuilderValidWindows[i]++;
+	if (worstPermille < RF_CHANNEL_HISTORY_BAD_PERMILLE &&
+	    g_rfJournalBuilderBadWindows[i] != 0xFFu)
+		g_rfJournalBuilderBadWindows[i]++;
+}
+
+static void rfJournalBuilderMarkHopFailure(uint8_t index)
+{
+	if (index >= RF_CHANNEL_HISTORY_POOL_COUNT)
+		return;
+	g_rfJournalBuilderWorstPermille[index] = 0;
+	g_rfJournalBuilderMeanSumPermille[index] = 0;
+	g_rfJournalBuilderValidWindows[index] = 1;
+	g_rfJournalBuilderBadWindows[index] = 10;
+}
+
+static uint8_t rfJournalBuilderSelectBest()
+{
+	int best = -1;
+	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++) {
+		if (g_rfJournalBuilderValidWindows[i] <
+		    RF_JOURNAL_BUILDER_WINDOWS)
+			continue;
+		const uint16_t worst = g_rfJournalBuilderWorstPermille[i];
+		const uint16_t mean =
+			(uint16_t)(g_rfJournalBuilderMeanSumPermille[i] /
+				   g_rfJournalBuilderValidWindows[i]);
+		if (best < 0) {
+			best = i;
+			continue;
+		}
+		const uint16_t bestWorst =
+			g_rfJournalBuilderWorstPermille[best];
+		const uint16_t bestMean =
+			(uint16_t)(g_rfJournalBuilderMeanSumPermille[best] /
+				   g_rfJournalBuilderValidWindows[best]);
+		if (worst > bestWorst ||
+		    (worst == bestWorst && mean > bestMean) ||
+		    (worst == bestWorst && mean == bestMean &&
+		     g_rfJournalBuilderBadWindows[i] <
+			     g_rfJournalBuilderBadWindows[best]) ||
+		    (worst == bestWorst && mean == bestMean &&
+		     g_rfJournalBuilderBadWindows[i] ==
+			     g_rfJournalBuilderBadWindows[best] &&
+		     g_ambientStableValid &&
+		     g_ambientStableRssi[i] > g_ambientStableRssi[best]))
+			best = i;
+	}
+	return best < 0 ? 0u : g_recoveryChannelPool[best];
+}
+
+static bool rfJournalBuilderPromoteAndStartWrite(unsigned long now)
+{
+	if (g_rfJournalBuilderPromoted)
+		return true;
+	if (g_channelJournalJobActive || g_channelJournalFreeSlot < 0)
+		return false;
+
+	uint8_t order = g_channelHistoryPersistentOrderCounter;
+	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++) {
+		const uint8_t windows = g_rfJournalBuilderValidWindows[i];
+		if (!windows)
+			return false;
+		const uint16_t worst = g_rfJournalBuilderWorstPermille[i];
+		const uint16_t mean =
+			(uint16_t)(g_rfJournalBuilderMeanSumPermille[i] /
+				   windows);
+		g_channelHistoryPersistentWorstPct[i] =
+			(uint8_t)(worst > 1000u ? 100u : worst / 10u);
+		g_channelHistoryPersistentMeanPct[i] =
+			(uint8_t)(mean > 1000u ? 100u : mean / 10u);
+		g_channelHistoryPersistentTrials[i] = windows;
+		g_channelHistoryPersistentConfidence[i] =
+			(uint8_t)((windows / 4u) > 15u ? 15u : windows / 4u);
+		g_channelHistoryPersistentPenalty[i] =
+			g_rfJournalBuilderBadWindows[i] > 10u ?
+				10u :
+				g_rfJournalBuilderBadWindows[i];
+		order++;
+		g_channelHistoryPersistentRecentOrder[i] = order;
+	}
+	g_channelHistoryPersistentOrderCounter = order;
+	g_channelHistoryPersistentDirty = true;
+	g_channelHistoryPersistentGeneration++;
+	g_rfJournalBuilderPromoted = true;
+	g_channelHistoryResidenceChannel = 0xFFu;
+	g_channelHistoryResidenceOutcomeRecorded = false;
+	if (!rfChannelJournalStartWrite())
+		return false;
+	rfChannelJournalStep(now, rfChannelLiveMask(now));
+	return true;
+}
+
+static bool rfJournalBuilderImmediateHop(uint8_t channel)
+{
+	if (rfChannelHistoryPoolIndex(channel) < 0)
+		return false;
+	if (channel == g_sessCh || g_rfChHandoffState != RF_CH_IDLE ||
+	    g_rfChGroupActive)
+		return channel == g_sessCh;
+	const unsigned long now = millis();
+	const uint8_t mask = rfChannelLiveMask(now);
+	if (!mask) {
+		g_sessCh = channel;
+		g_rfCh = channel;
+		g_lastSessBeacon = 0;
+		g_lastDisc = 0;
+		g_lastChannelHopMs = now;
+		g_qosLastHopMs = now;
+		g_linkQualityCheckMs = now;
+		g_qosCheckMs = now;
+		for (int s = 0; s < NSLOT; s++) {
+			rfLinkQualityResetWindow(s);
+			g_linkQualityBadStreak[s] = 0;
+		}
+		rfChannelRecoverySyncResidence();
+		(void)rfChannelRecoverySetTarget(0u);
+		rfChannelEvidenceSyncResidence();
+		rfChannelHistorySyncResidence();
+		rfConfig(channel);
+		return true;
+	}
+	return rfChannelGroupBegin(g_sessCh, channel, mask, now, true);
+}
+
+bool rfRecoveryRequestJournalBuilder()
+{
+	const unsigned long now = millis();
+	rfChannelHistoryEnsureLoaded();
+	if (rfJournalBuilderActive() || g_rfChHandoffState != RF_CH_IDLE ||
+	    g_rfChGroupActive || g_channelJournalJobActive) {
+		g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_FAILED;
+		g_rfJournalBuilderFailure = RF_JOURNAL_BUILDER_FAIL_BUSY;
+		return false;
+	}
+	const uint8_t liveMask = rfChannelLiveMask(now);
+	if (!liveMask) {
+		g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_FAILED;
+		g_rfJournalBuilderFailure =
+			RF_JOURNAL_BUILDER_FAIL_NO_CONTROLLERS;
+		return false;
+	}
+	if (g_channelJournalFreeSlot < 0) {
+		g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_FAILED;
+		g_rfJournalBuilderFailure =
+			RF_JOURNAL_BUILDER_FAIL_JOURNAL_FULL;
+		return false;
+	}
+
+	rfJournalBuilderResetAll();
+	g_rfJournalBuilderParticipants = liveMask;
+	g_rfJournalBuilderOriginChannel = g_sessCh;
+	g_rfJournalBuilderSurveyGeneration = g_ambientSurveyGeneration;
+	g_rfJournalBuilderCohortStableMs = now;
+	rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_SURVEY, now);
+	rfJournalBuilderRequestAmbientSurvey();
+	(void)rfChannelRecoverySetTarget(0u);
+	rfJournalBuilderResetQualityWindows();
+	return true;
+}
+
+void rfRecoveryCancelJournalBuilder()
+{
+	if (!rfJournalBuilderActive() ||
+	    g_rfJournalBuilderPhase == RF_JOURNAL_BUILDER_SAVING)
+		return;
+	g_rfJournalBuilderCancelRequested = true;
+}
+
+static void rfJournalBuilderFinishCanceled(unsigned long now)
+{
+	if (g_sessCh != g_rfJournalBuilderOriginChannel) {
+		if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
+			return;
+		if (!rfJournalBuilderImmediateHop(
+			    g_rfJournalBuilderOriginChannel))
+			return;
+		if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
+			return;
+		if (g_sessCh != g_rfJournalBuilderOriginChannel)
+			return;
+	}
+	g_rfJournalBuilderCancelRequested = false;
+	g_rfJournalBuilderParticipants = 0;
+	g_rfJournalBuilderChannel = 0;
+	rfJournalBuilderResetQualityWindows();
+	rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_CANCELED, now);
+}
+
+static void rfJournalBuilderTask()
+{
+	const unsigned long now = millis();
+	if (!rfJournalBuilderActive())
+		return;
+
+	if (g_rfJournalBuilderCancelRequested) {
+		rfJournalBuilderFinishCanceled(now);
+		return;
+	}
+
+	const uint8_t liveMask = rfChannelLiveMask(now);
+	if (g_rfJournalBuilderPhase != RF_JOURNAL_BUILDER_SAVING &&
+	    liveMask != g_rfJournalBuilderParticipants) {
+		if (g_rfJournalBuilderPhase != RF_JOURNAL_BUILDER_PAUSED) {
+			g_rfJournalBuilderResumePhase =
+				g_rfJournalBuilderPhase ==
+						RF_JOURNAL_BUILDER_SURVEY ?
+					RF_JOURNAL_BUILDER_SURVEY :
+					RF_JOURNAL_BUILDER_HOPPING;
+			if (g_rfJournalBuilderIndex <
+			    RF_CHANNEL_HISTORY_POOL_COUNT)
+				rfJournalBuilderResetChannel(
+					g_rfJournalBuilderIndex);
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_PAUSED,
+						 now);
+			g_rfJournalBuilderCohortStableMs = 0;
+			rfJournalBuilderResetQualityWindows();
+		}
+		return;
+	}
+	if (g_rfJournalBuilderPhase == RF_JOURNAL_BUILDER_PAUSED) {
+		if (!g_rfJournalBuilderCohortStableMs)
+			g_rfJournalBuilderCohortStableMs = now;
+		if ((uint32_t)(now - g_rfJournalBuilderCohortStableMs) <
+		    RF_JOURNAL_BUILDER_RECONNECT_STABLE_MS)
+			return;
+		rfJournalBuilderSetPhase(g_rfJournalBuilderResumePhase, now);
+		g_rfJournalBuilderHopAttempts = 0;
+		rfJournalBuilderResetQualityWindows();
+		return;
+	}
+
+	switch (g_rfJournalBuilderPhase) {
+	case RF_JOURNAL_BUILDER_SURVEY:
+		if (g_ambientSurveyGeneration !=
+			    g_rfJournalBuilderSurveyGeneration &&
+		    !g_ambientSurveyRunning && !g_ambientSurveyPending &&
+		    !g_ambientSurveyManual) {
+			g_rfJournalBuilderIndex = 0;
+			g_rfJournalBuilderChannel = g_recoveryChannelPool[0];
+			g_rfJournalBuilderHopAttempts = 0;
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_HOPPING,
+						 now);
+			return;
+		}
+		if (!g_ambientSurveyRunning && !g_ambientSurveyPending &&
+		    !g_ambientSurveyManual)
+			rfJournalBuilderRequestAmbientSurvey();
+		return;
+
+	case RF_JOURNAL_BUILDER_HOPPING: {
+		if (g_rfJournalBuilderIndex >= RF_CHANNEL_HISTORY_POOL_COUNT) {
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_SELECTING,
+						 now);
+			return;
+		}
+		const uint8_t target =
+			g_recoveryChannelPool[g_rfJournalBuilderIndex];
+		g_rfJournalBuilderChannel = target;
+		if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
+			return;
+		if (g_sessCh == target) {
+			rfJournalBuilderResetChannel(g_rfJournalBuilderIndex);
+			rfJournalBuilderResetQualityWindows();
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_SETTLING,
+						 now);
+			return;
+		}
+		if (g_rfJournalBuilderHopAttempts >=
+		    RF_JOURNAL_BUILDER_HOP_ATTEMPTS) {
+			rfJournalBuilderMarkHopFailure(g_rfJournalBuilderIndex);
+			hapticRfJournalBuilderTick(
+				g_rfJournalBuilderParticipants);
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_BETWEEN,
+						 now);
+			return;
+		}
+		g_rfJournalBuilderHopAttempts++;
+		(void)rfJournalBuilderImmediateHop(target);
+		return;
+	}
+
+	case RF_JOURNAL_BUILDER_SETTLING:
+		if ((uint32_t)(now - g_rfJournalBuilderPhaseMs) <
+		    RF_JOURNAL_BUILDER_SETTLE_MS)
+			return;
+		rfJournalBuilderResetQualityWindows();
+		rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_MEASURING, now);
+		return;
+
+	case RF_JOURNAL_BUILDER_MEASURING:
+		if (g_rfJournalBuilderValidWindows[g_rfJournalBuilderIndex] <
+		    RF_JOURNAL_BUILDER_WINDOWS)
+			return;
+		hapticRfJournalBuilderTick(g_rfJournalBuilderParticipants);
+		rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_BETWEEN, now);
+		return;
+
+	case RF_JOURNAL_BUILDER_BETWEEN:
+		rfJournalBuilderResetQualityWindows();
+		if ((uint32_t)(now - g_rfJournalBuilderPhaseMs) <
+		    RF_JOURNAL_BUILDER_BETWEEN_MS)
+			return;
+		g_rfJournalBuilderIndex++;
+		g_rfJournalBuilderHopAttempts = 0;
+		if (g_rfJournalBuilderIndex >= RF_CHANNEL_HISTORY_POOL_COUNT)
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_SELECTING,
+						 now);
+		else {
+			g_rfJournalBuilderChannel =
+				g_recoveryChannelPool[g_rfJournalBuilderIndex];
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_HOPPING,
+						 now);
+		}
+		return;
+
+	case RF_JOURNAL_BUILDER_SELECTING:
+		g_rfJournalBuilderBestChannel = rfJournalBuilderSelectBest();
+		if (!g_rfJournalBuilderBestChannel) {
+			g_rfJournalBuilderFailure =
+				RF_JOURNAL_BUILDER_FAIL_NO_VALID_CHANNEL;
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_FAILED,
+						 now);
+			return;
+		}
+		g_rfJournalBuilderChannel = g_rfJournalBuilderBestChannel;
+		g_rfJournalBuilderHopAttempts = 0;
+		rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_FINAL_HOP, now);
+		return;
+
+	case RF_JOURNAL_BUILDER_FINAL_HOP:
+		if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
+			return;
+		if (g_sessCh == g_rfJournalBuilderBestChannel) {
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_SAVING,
+						 now);
+			return;
+		}
+		if (g_rfJournalBuilderHopAttempts >=
+		    RF_JOURNAL_BUILDER_HOP_ATTEMPTS) {
+			g_rfJournalBuilderFailure =
+				RF_JOURNAL_BUILDER_FAIL_FINAL_HOP;
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_FAILED,
+						 now);
+			return;
+		}
+		g_rfJournalBuilderHopAttempts++;
+		(void)rfJournalBuilderImmediateHop(
+			g_rfJournalBuilderBestChannel);
+		return;
+
+	case RF_JOURNAL_BUILDER_SAVING:
+		if (!g_rfJournalBuilderPromoted &&
+		    !rfJournalBuilderPromoteAndStartWrite(now)) {
+			g_rfJournalBuilderFailure =
+				RF_JOURNAL_BUILDER_FAIL_SAVE;
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_FAILED,
+						 now);
+			return;
+		}
+		rfChannelJournalStep(now, liveMask);
+		if (g_rfJournalBuilderPromoted && !g_channelJournalJobActive &&
+		    g_channelHistoryPersistentDirty) {
+			g_rfJournalBuilderFailure =
+				RF_JOURNAL_BUILDER_FAIL_SAVE;
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_FAILED,
+						 now);
+			return;
+		}
+		if (!g_channelJournalJobActive &&
+		    !g_channelHistoryPersistentDirty) {
+			g_rfJournalBuilderParticipants = 0;
+			g_rfJournalBuilderChannel =
+				g_rfJournalBuilderBestChannel;
+			rfJournalBuilderResetQualityWindows();
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_COMPLETE,
+						 now);
+		}
+		return;
+
+	default:
+		return;
+	}
+}
+
 static void rfChannelEvidenceClearParticipant(uint8_t slot)
 {
 	if (slot >= NSLOT)
@@ -1667,16 +2172,18 @@ static void rfCohortQualityWindow(uint8_t liveMask, uint32_t now)
 		const bool bad = valid &&
 				 successPermille <
 					 RF_LINK_QUALITY_BAD_SUCCESS_PERMILLE;
-		if (bad) {
-			if (g_linkQualityBadStreak[s] != 0xFF)
-				g_linkQualityBadStreak[s]++;
-
-		} else {
-			g_linkQualityBadStreak[s] = 0;
+		if (!rfJournalBuilderActive()) {
+			if (bad) {
+				if (g_linkQualityBadStreak[s] != 0xFF)
+					g_linkQualityBadStreak[s]++;
+			} else {
+				g_linkQualityBadStreak[s] = 0;
+			}
+			rfChannelEvidenceObserve(s, g_sessCh, successPermille,
+						 valid, now);
+			rfStartupChannelObserveWindow(s, successPermille,
+						      valid);
 		}
-		rfChannelEvidenceObserve(s, g_sessCh, successPermille, valid,
-					 now);
-		rfStartupChannelObserveWindow(s, successPermille, valid);
 		if (!valid)
 			allValid = false;
 		else if (successPermille < currentWorst)
@@ -1704,10 +2211,18 @@ static void rfCohortQualityWindow(uint8_t liveMask, uint32_t now)
 	}
 	const uint16_t historyMean =
 		historyCount ? (uint16_t)(historySum / historyCount) : 0u;
-	rfChannelHistoryObserve(g_sessCh, currentWorst, historyMean,
-				allValid && historyCount != 0u);
+	if (rfJournalBuilderActive()) {
+		rfJournalBuilderObserveWindow(g_sessCh, currentWorst,
+					      historyMean,
+					      allValid && historyCount != 0u);
+	} else {
+		rfChannelHistoryObserve(g_sessCh, currentWorst, historyMean,
+					allValid && historyCount != 0u);
+	}
 	for (int s = 0; s < NSLOT; s++)
 		rfLinkQualityResetWindow(s);
+	if (rfJournalBuilderActive())
+		return;
 	if (!allValid || !wouldPending)
 		return;
 	if (g_channelRecoveryDecidedThisResidence)
@@ -1724,7 +2239,8 @@ static void rfLinkQualityTask()
 {
 	const unsigned long now = millis();
 	rfChannelHistoryEnsureLoaded();
-	rfChannelHistoryMaybeCheckpoint(now);
+	if (!rfJournalBuilderActive())
+		rfChannelHistoryMaybeCheckpoint(now);
 	if (g_ambientSurveyManual) {
 		for (int s = 0; s < NSLOT; s++)
 			rfLinkQualityResetWindow(s);
@@ -1732,8 +2248,16 @@ static void rfLinkQualityTask()
 		g_qosCheckMs = now;
 		return;
 	}
-	if (!g_qos)
+	if (!g_qos && !rfJournalBuilderActive())
 		return;
+	if (rfJournalBuilderActive() &&
+	    g_rfJournalBuilderPhase != RF_JOURNAL_BUILDER_MEASURING) {
+		for (int s = 0; s < NSLOT; s++)
+			rfLinkQualityResetWindow(s);
+		g_linkQualityCheckMs = now;
+		g_qosCheckMs = now;
+		return;
+	}
 	if ((uint32_t)(now - g_qosCheckMs) < RF_LINK_QUALITY_WINDOW_MS)
 		return;
 	g_linkQualityCheckMs = now;
@@ -2286,35 +2810,9 @@ void rfHopTo(uint8_t newCh)
 
 bool rfRecoveryRequestManualHop(uint8_t channel)
 {
-	if (rfChannelHistoryPoolIndex(channel) < 0)
+	if (rfJournalBuilderActive())
 		return false;
-	if (channel == g_sessCh || g_rfChHandoffState != RF_CH_IDLE ||
-	    g_rfChGroupActive)
-		return false;
-	const unsigned long now = millis();
-	const uint8_t mask = rfChannelLiveMask(now);
-	if (!mask) {
-		g_sessCh = channel;
-		g_rfCh = channel;
-		g_lastSessBeacon = 0;
-		g_lastDisc = 0;
-		g_lastChannelHopMs = now;
-		g_qosLastHopMs = now;
-		g_linkQualityCheckMs = now;
-		g_qosCheckMs = now;
-		for (int s = 0; s < NSLOT; s++) {
-			rfLinkQualityResetWindow(s);
-			g_linkQualityBadStreak[s] = 0;
-		}
-		rfChannelRecoverySyncResidence();
-		(void)rfChannelRecoverySetTarget(0u);
-		rfChannelEvidenceSyncResidence();
-		rfChannelHistorySyncResidence();
-		rfConfig(channel);
-		return true;
-	}
-
-	return rfChannelGroupBegin(g_sessCh, channel, mask, now, true);
+	return rfJournalBuilderImmediateHop(channel);
 }
 
 // TX one connected packet [LEN][S1][payload] on channel ch, then RX the reply into rfrx; decodes 0xF1.
@@ -3071,6 +3569,7 @@ static void rfConnStep()
 void rfLinkTask()
 {
 	rfChannelHandoffTask();
+	rfJournalBuilderTask();
 	if (rfChannelHandoffOwnsRadio())
 		return;
 	rfStartupChannelTask();

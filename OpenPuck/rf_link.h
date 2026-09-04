@@ -147,6 +147,22 @@ enum RfRecoveryHandoffPhase : uint8_t {
 	RF_RECOVERY_HANDOFF_ACQUIRE_OLD = 7,
 };
 
+enum RfJournalBuilderPhase : uint8_t {
+	RF_JOURNAL_BUILDER_IDLE = 0,
+	RF_JOURNAL_BUILDER_SURVEY = 1,
+	RF_JOURNAL_BUILDER_HOPPING = 2,
+	RF_JOURNAL_BUILDER_SETTLING = 3,
+	RF_JOURNAL_BUILDER_MEASURING = 4,
+	RF_JOURNAL_BUILDER_BETWEEN = 5,
+	RF_JOURNAL_BUILDER_SELECTING = 6,
+	RF_JOURNAL_BUILDER_FINAL_HOP = 7,
+	RF_JOURNAL_BUILDER_SAVING = 8,
+	RF_JOURNAL_BUILDER_PAUSED = 9,
+	RF_JOURNAL_BUILDER_COMPLETE = 10,
+	RF_JOURNAL_BUILDER_CANCELED = 11,
+	RF_JOURNAL_BUILDER_FAILED = 12,
+};
+
 struct RfRecoveryStatus {
 	uint8_t version;
 	uint8_t flags;
@@ -161,10 +177,19 @@ struct RfRecoveryStatus {
 	uint8_t handoffPhase;
 	uint16_t handoffElapsedMs;
 	uint8_t handoffOldChannel;
+	uint8_t journalBuilderPhase;
+	uint8_t journalBuilderIndex;
+	uint8_t journalBuilderChannel;
+	uint8_t journalBuilderProgress;
+	uint8_t journalBuilderParticipantMask;
+	uint8_t journalBuilderBestChannel;
+	uint8_t journalBuilderFailure;
 };
 
 void rfRecoveryRequestAmbientSurvey();
 bool rfRecoveryRequestManualHop(uint8_t channel);
+bool rfRecoveryRequestJournalBuilder();
+void rfRecoveryCancelJournalBuilder();
 void rfRecoveryStatusSnapshot(RfRecoveryStatus *status);
 
 // TX one connected packet [LEN][S1][payload] on channel ch, then RX the reply into rfrx; decodes 0xF1.

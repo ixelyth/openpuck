@@ -480,9 +480,9 @@ static bool webusbSendRfStatus()
 		return false;
 	static RfRecoveryStatus status;
 	rfRecoveryStatusSnapshot(&status);
-	// Four-byte trailer after the counted channel rows adds live handoff telemetry without shifting
-	// the v1 header/row offsets, so older panels can safely ignore it.
-	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4];
+	// Append-only trailers after the counted channel rows preserve the v1
+	// header/row offsets: 4 bytes handoff telemetry + 7 bytes journal-builder status.
+	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7];
 	uint8_t *q = f + 2;
 	f[0] = 0xAD;
 	f[1] = (uint8_t)(sizeof f - 2u);
@@ -515,6 +515,13 @@ static bool webusbSendRfStatus()
 	*q++ = (uint8_t)status.handoffElapsedMs;
 	*q++ = (uint8_t)(status.handoffElapsedMs >> 8);
 	*q++ = status.handoffOldChannel;
+	*q++ = status.journalBuilderPhase;
+	*q++ = status.journalBuilderIndex;
+	*q++ = status.journalBuilderChannel;
+	*q++ = status.journalBuilderProgress;
+	*q++ = status.journalBuilderParticipantMask;
+	*q++ = status.journalBuilderBestChannel;
+	*q++ = status.journalBuilderFailure;
 	if (tud_vendor_write_available() < sizeof f)
 		return false;
 	usb_web.write(f, sizeof f);
@@ -1152,6 +1159,14 @@ void webusbPoll()
 					break;
 				case 99:
 					(void)rfRecoveryRequestManualHop(v);
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				case 101:
+					if (v)
+						(void)rfRecoveryRequestJournalBuilder();
+					else
+						rfRecoveryCancelJournalBuilder();
 					g_rfStatusRequest = true;
 					persist = false;
 					break;

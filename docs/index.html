@@ -274,10 +274,12 @@
         <div class="stat"><div class="k">Journal sequence</div><div class="v" id="rfJournalSeq">—</div></div>
         <div class="stat"><div class="k">Journal writes this boot</div><div class="v" id="rfJournalWrites">—</div></div>
         <div class="stat"><div class="k">Handoff status</div><div class="v" id="rfHandoffStatus" style="font-size:14px">Idle</div></div>
+        <div class="stat"><div class="k">Journal builder</div><div class="v" id="rfBuilderStatus" style="font-size:14px">Idle</div></div>
       </div>
       <div class="row" style="margin-top:10px">
         <button id="rfRefresh">Refresh RF status</button>
         <button id="rfSurvey" style="margin-left:8px">Survey ambient RF</button>
+        <button id="rfBuilder" style="margin-left:8px">Build RF journal</button>
         <span class="note" id="rfSurveyNote" style="flex:1">An explicit survey runs immediately, even while a controller is linked; brief input jitter may occur.</span>
       </div>
       <p class="note" style="margin-top:10px"><strong>Manual Hop:</strong> clicking Hop immediately negotiates the channel change for every live controller.<br><strong>Startup</strong> saves that channel for the next boot, and automatic RF learning may replace it later.</p>
@@ -762,7 +764,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
 function rfChLabel(ch){ return ch ? `Ch ${ch} · ${2400+ch} MHz` : "—"; }
@@ -787,6 +789,34 @@ function applyRfStatus(p){
   else if(hopPhase>=5) hopText+=(hopOld?` Ch ${hopOld}`:"");
   if(hopPhase) hopText+=` · ${hopElapsed} ms`;
   $("#rfHandoffStatus").textContent=hopText;
+  const builderBase=tail+4;
+  const builderPhase=p.length>=builderBase+7?p[builderBase]:0;
+  const builderIndex=p.length>=builderBase+7?p[builderBase+1]:0;
+  const builderChannel=p.length>=builderBase+7?p[builderBase+2]:0;
+  const builderProgress=p.length>=builderBase+7?p[builderBase+3]:0;
+  const builderMask=p.length>=builderBase+7?p[builderBase+4]:0;
+  const builderBest=p.length>=builderBase+7?p[builderBase+5]:0;
+  const builderFailure=p.length>=builderBase+7?p[builderBase+6]:0;
+  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed"];
+  let builderText="Idle";
+  if(builderPhase===1) builderText="Ambient survey";
+  else if(builderPhase===2) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · hopping to Ch ${builderChannel}`;
+  else if(builderPhase===3) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · settling Ch ${builderChannel}`;
+  else if(builderPhase===4) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · Ch ${builderChannel} · ${builderProgress}/60 s`;
+  else if(builderPhase===5) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · between channels`;
+  else if(builderPhase===6) builderText="Selecting best channel";
+  else if(builderPhase===7) builderText=`Final hop · Ch ${builderBest||builderChannel}`;
+  else if(builderPhase===8) builderText=`Saving journal${builderBest?` · Ch ${builderBest}`:""}`;
+  else if(builderPhase===9) builderText=`Paused · waiting for controller cohort 0x${builderMask.toString(16).toUpperCase()}`;
+  else if(builderPhase===10) builderText=`Complete${builderBest?` · Ch ${builderBest} selected`:""}`;
+  else if(builderPhase===11) builderText="Canceled";
+  else if(builderPhase===12) builderText=`Failed · ${builderFailureText[builderFailure]||("code "+builderFailure)}`;
+  $("#rfBuilderStatus").textContent=builderText;
+  rfBuilderActive=builderPhase>=1&&builderPhase<=9;
+  rfBuilderSaving=builderPhase===8;
+  $("#rfBuilder").textContent=rfBuilderActive?"Cancel Journal Build":"Build RF journal";
+  $("#rfBuilder").disabled=rfBuilderSaving;
+  $("#rfSurvey").disabled=rfBuilderActive;
   rfHandoffActive=handoff;
   if(rfHopPending&&!handoff) rfHopPending=false;
   $("#rfSurveyState").textContent=running?"running":pending?(handoff?"queued for handoff":"requested"):ambient?`cached #${generation}`:"not sampled";
@@ -803,7 +833,7 @@ function applyRfStatus(p){
     const hopBtn=document.createElement("button");
     hopBtn.textContent=ch===current?"Active":"Hop";
     hopBtn.dataset.rfHop="1";
-    hopBtn.disabled=ch===current||handoff||rfHopPending;
+    hopBtn.disabled=ch===current||handoff||rfHopPending||rfBuilderActive;
     hopBtn.style.padding="4px 8px";
     hopBtn.addEventListener("click",()=>manualHopRf(ch));
     hopCell.appendChild(hopBtn);
@@ -827,7 +857,7 @@ function setRfHopButtonsDisabled(disabled){
   rfHopPending=!!disabled;
   for(const tr of $("#rfJournalBody").querySelectorAll("tr")){
     const btn=tr.querySelector("button[data-rf-hop]"); if(!btn) continue;
-    btn.disabled=rfHopPending||rfHandoffActive||btn.textContent==="Active";
+    btn.disabled=rfHopPending||rfHandoffActive||rfBuilderActive||btn.textContent==="Active";
   }
 }
 function showRfHopTarget(ch){
@@ -883,6 +913,34 @@ async function manualStartupRf(ch){
     const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
     rfLastRefresh=Date.now();
   }catch(e){ log("RF startup err: "+e.message); }
+  finally{ rfBusy=false; }
+}
+async function manualJournalBuilderRf(){
+  if(!dev||isDongle||!rfCapable||rfBuilderSaving) return;
+  if(rfBuilderActive){
+    if(!confirm("Cancel the RF Journal Builder? The current safe RF operation will finish, the puck will return to the channel that was active before the build, and the existing saved journal will be preserved.")) return;
+    if(!(await waitRfUiIdle())) return;
+    rfBusy=true;
+    try{
+      await waitIdle(); if(!dev) return;
+      await send([0x02,101,0]);
+      const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+      rfLastRefresh=Date.now();
+    }catch(e){ log("RF journal builder cancel err: "+e.message); }
+    finally{ rfBusy=false; }
+    return;
+  }
+  const ok=confirm("RF Journal Builder\n\nPlace all connected controllers at approximately the farthest distance from the puck at which you normally use them, and leave them in their normal operating location during the test.\n\nThe puck will survey ambient RF, test all 14 recovery channels for about 60 seconds each, select the best channel, and save one completed RF journal record. The test takes roughly 15 minutes.\n\nStart the journal build?");
+  if(!ok) return;
+  $("#rfBuilderStatus").textContent="Starting…";
+  if(!(await waitRfUiIdle())) return;
+  rfBusy=true;
+  try{
+    await waitIdle(); if(!dev) return;
+    await send([0x02,101,1]);
+    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    rfLastRefresh=Date.now();
+  }catch(e){ log("RF journal builder err: "+e.message); }
   finally{ rfBusy=false; }
 }
 async function manualSurveyRf(){
@@ -1116,8 +1174,8 @@ function applyBlob(p){
   const rssi=(p.length>37?p[37]:0);
   rfCapable=(p.length>179 && p[179]===0x52);
   const rfCard=$("#rfRecoveryCard"); if(rfCard) rfCard.classList.toggle("hide", !rfCapable);
-  if(rfCapable && !rfBusy && Date.now()-rfLastRefresh>2000)
-    setTimeout(()=>refreshRfStatus(false),0);
+  if(rfCapable&&Date.now()-rfLastRefresh>(rfHandoffActive||rfHopPending?100:rfBuilderActive?500:2000)) refreshRfStatus(false);
+
 
   // per-slot link status (protocol v8, p.length >= 73)
   const hasSlotsData = p.length >= 73;
@@ -2492,6 +2550,7 @@ $("#rumbleScale").addEventListener("change", ()=>setField(22, (+$("#rumbleScale"
 $("#swGyroMap").addEventListener("change", ()=>setField(38, +$("#swGyroMap").value));
 $("#rfRefresh").onclick=()=>refreshRfStatus(false);
 $("#rfSurvey").onclick=()=>manualSurveyRf();
+$("#rfBuilder").onclick=()=>manualJournalBuilderRf();
 for(const sel of document.querySelectorAll("select.chord")){
   sel.addEventListener("change", ()=>setField(CHORD_FIELD[+sel.dataset.i], +sel.value));
 }

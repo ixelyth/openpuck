@@ -678,6 +678,27 @@ void hapticOnReconnect(int slot)
 // hapticSteamRumble() path (so g_rumbleStyle / g_rumbleScale / the per-type rumble toggle all apply), and
 // schedule the stop. Deadline 0 = idle; millis()+MS can be 0 only once every 49 days, so bias it off zero.
 static unsigned long g_rumbleTestStop = 0;
+static unsigned long g_rfJournalBuilderTickStop = 0;
+static uint8_t g_rfJournalBuilderTickMask = 0;
+
+void hapticRfJournalBuilderTick(uint8_t participantMask)
+{
+	g_rfJournalBuilderTickMask = 0;
+	for (uint8_t s = 0; s < NSLOT; s++) {
+		const uint8_t bit = (uint8_t)(1u << s);
+		if ((participantMask & bit) && hapticLinkUp((int)s) &&
+		    hapticSteamRumble(RF_JOURNAL_BUILDER_TICK_AMP,
+				      RF_JOURNAL_BUILDER_TICK_AMP, s))
+			g_rfJournalBuilderTickMask |= bit;
+	}
+	if (!g_rfJournalBuilderTickMask) {
+		g_rfJournalBuilderTickStop = 0;
+		return;
+	}
+	g_rfJournalBuilderTickStop = millis() + RF_JOURNAL_BUILDER_TICK_MS;
+	if (!g_rfJournalBuilderTickStop)
+		g_rfJournalBuilderTickStop = 1;
+}
 
 void hapticTestRumble()
 {
@@ -691,6 +712,18 @@ void hapticTestRumble()
 
 void hapticTask()
 {
+	// The journal-builder tick is outside the measured window. Queue explicit
+	// stops before the builder's inter-channel quiet guard expires.
+	if (g_rfJournalBuilderTickStop &&
+	    (long)(millis() - g_rfJournalBuilderTickStop) >= 0) {
+		g_rfJournalBuilderTickStop = 0;
+		const uint8_t mask = g_rfJournalBuilderTickMask;
+		g_rfJournalBuilderTickMask = 0;
+		for (uint8_t s = 0; s < NSLOT; s++)
+			if (mask & (uint8_t)(1u << s))
+				hapticSteamRumble(0, 0, s);
+	}
+
 	// stop the test buzz -- signed compare so the millis() rollover cannot strand a latched actuator
 	if (g_rumbleTestStop && (long)(millis() - g_rumbleTestStop) >= 0) {
 		g_rumbleTestStop = 0;
