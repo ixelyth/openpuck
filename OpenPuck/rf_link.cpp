@@ -158,6 +158,7 @@ static unsigned long g_channelHistoryPersistentLastWriteMs = 0;
 #define RF_AMBIENT_SURVEY_IDLE_GUARD_MS 10000u
 #define RF_AMBIENT_SURVEY_POST_HOP_GUARD_MS 30000u
 #define RF_AMBIENT_SURVEY_REFRESH_MS 60000u
+#define RF_AMBIENT_SURVEY_SAMPLE_RETRY_MAX 5u
 static uint8_t g_ambientStableRssi[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
 static uint8_t g_ambientWorkRssi[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
 static uint8_t g_ambientWorkSamples[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
@@ -173,6 +174,10 @@ static uint16_t g_ambientSurveyGeneration = 0;
 static unsigned long g_ambientSurveyIdleSinceMs = 0;
 static unsigned long g_ambientSurveyLastStepMs = 0;
 static unsigned long g_ambientSurveyLastCompleteMs = 0;
+static unsigned long g_ambientSurveyLastAttemptMs = 0;
+static uint8_t g_ambientSurveySampleRetry = 0;
+static uint8_t g_ambientSurveyFailure = RF_AMBIENT_SURVEY_FAIL_NONE;
+static uint8_t g_ambientSurveyFailureChannel = 0;
 
 #define RF_JOURNAL_BUILDER_WINDOWS 60u
 #define RF_JOURNAL_BUILDER_SETTLE_MS 2000u
@@ -191,6 +196,7 @@ enum RfJournalBuilderFailure : uint8_t {
 	RF_JOURNAL_BUILDER_FAIL_JOURNAL_WRITE_BUSY = 7,
 	RF_JOURNAL_BUILDER_FAIL_IDLE_TIMEOUT_QUERY = 8,
 	RF_JOURNAL_BUILDER_FAIL_STARTUP_SAVE = 9,
+	RF_JOURNAL_BUILDER_FAIL_AMBIENT_SURVEY = 10,
 };
 
 static uint8_t g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_IDLE;
@@ -275,6 +281,7 @@ static bool rfChannelRecoveryCooldownActive(unsigned long now);
 static void rfChannelRecoveryAbandonAutomaticAttempt(uint8_t target,
 						     unsigned long now);
 static void rfChannelGroupAbort();
+static void rfAmbientSurveyAbort();
 static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 				unsigned long now, bool manualImmediate);
 
@@ -1155,16 +1162,33 @@ static bool rfIdleTimeoutRfWorkflowBusy()
 	       g_ambientSurveyPending || g_ambientSurveyManual;
 }
 
-void rfRecoveryRequestAmbientSurvey()
+bool rfRecoveryRequestAmbientSurvey()
 {
 	if (rfJournalBuilderActive() || rfIdleTimeoutTestBusy())
-		return;
+		return false;
+	// Re-clicking an already accepted explicit survey is idempotent. If the
+	// radio is instead running an autonomous scan, explicit user intent wins:
+	// discard that partial scan and restart from the first pool channel.
+	if (g_ambientSurveyManual &&
+	    (g_ambientSurveyRunning || g_ambientSurveyPending))
+		return true;
+	if (g_ambientSurveyRunning)
+		rfAmbientSurveyAbort();
+	g_ambientSurveyFailure = RF_AMBIENT_SURVEY_FAIL_NONE;
+	g_ambientSurveyFailureChannel = 0;
+	g_ambientSurveySampleRetry = 0;
 	g_ambientSurveyManual = true;
 	g_ambientSurveyPending = true;
+	return true;
 }
 
 static void rfJournalBuilderRequestAmbientSurvey()
 {
+	if (g_ambientSurveyRunning)
+		rfAmbientSurveyAbort();
+	g_ambientSurveyFailure = RF_AMBIENT_SURVEY_FAIL_NONE;
+	g_ambientSurveyFailureChannel = 0;
+	g_ambientSurveySampleRetry = 0;
 	g_ambientSurveyManual = true;
 	g_ambientSurveyPending = true;
 }
@@ -1175,6 +1199,7 @@ static void rfAmbientSurveyAbort()
 	g_ambientSurveyIndex = 0;
 	g_ambientSurveyPass = 0;
 	g_ambientSurveyChannel = 0;
+	g_ambientSurveySampleRetry = 0;
 	memset(g_ambientWorkRssi, 0, sizeof g_ambientWorkRssi);
 	memset(g_ambientWorkSamples, 0, sizeof g_ambientWorkSamples);
 }
@@ -1186,6 +1211,7 @@ static void rfAmbientSurveyBegin(unsigned long now)
 	g_ambientSurveyIndex = 0;
 	g_ambientSurveyPass = 0;
 	g_ambientSurveyChannel = g_recoveryChannelPool[0];
+	g_ambientSurveySampleRetry = 0;
 	g_ambientSurveyLastStepMs = now - RF_AMBIENT_SURVEY_STEP_MS;
 	g_ambientSurveyRunning = true;
 	g_ambientSurveyPending = false;
@@ -1247,9 +1273,15 @@ static void rfAmbientSurveyTask()
 		g_ambientSurveyIdleSinceMs = 0;
 	}
 
-	const bool stale = !g_ambientStableValid ||
-			   (uint32_t)(now - g_ambientSurveyLastCompleteMs) >=
-				   RF_AMBIENT_SURVEY_REFRESH_MS;
+	// Rate-limit autonomous retries after either a success or a failed
+	// attempt. Explicit/Builder requests set pending and bypass this freshness
+	// gate, so a user-requested retry always starts immediately.
+	const unsigned long lastAttempt =
+		g_ambientSurveyLastAttemptMs > g_ambientSurveyLastCompleteMs ?
+			g_ambientSurveyLastAttemptMs :
+			g_ambientSurveyLastCompleteMs;
+	const bool stale = !lastAttempt || (uint32_t)(now - lastAttempt) >=
+						   RF_AMBIENT_SURVEY_REFRESH_MS;
 	if (!g_ambientSurveyRunning) {
 		if (!g_ambientSurveyPending && !stale)
 			return;
@@ -1264,12 +1296,29 @@ static void rfAmbientSurveyTask()
 	g_ambientSurveyChannel = g_recoveryChannelPool[i];
 	const uint8_t sample = rfAmbientMeasureChannel(
 		g_ambientSurveyChannel, RF_AMBIENT_SURVEY_SAMPLE_US);
-	if (sample) {
-		if (!g_ambientWorkRssi[i] || sample < g_ambientWorkRssi[i])
-			g_ambientWorkRssi[i] = sample;
-		if (g_ambientWorkSamples[i] != 0xFFu)
-			g_ambientWorkSamples[i]++;
+	if (!sample) {
+		if (g_ambientSurveySampleRetry <
+		    RF_AMBIENT_SURVEY_SAMPLE_RETRY_MAX) {
+			g_ambientSurveySampleRetry++;
+			return;
+		}
+		const bool reportFailure = g_ambientSurveyManual;
+		g_ambientSurveyFailure =
+			reportFailure ? RF_AMBIENT_SURVEY_FAIL_SAMPLE_TIMEOUT :
+					RF_AMBIENT_SURVEY_FAIL_NONE;
+		g_ambientSurveyFailureChannel =
+			reportFailure ? g_ambientSurveyChannel : 0u;
+		g_ambientSurveyLastAttemptMs = now;
+		rfAmbientSurveyAbort();
+		g_ambientSurveyPending = false;
+		g_ambientSurveyManual = false;
+		return;
 	}
+	g_ambientSurveySampleRetry = 0;
+	if (!g_ambientWorkRssi[i] || sample < g_ambientWorkRssi[i])
+		g_ambientWorkRssi[i] = sample;
+	if (g_ambientWorkSamples[i] != 0xFFu)
+		g_ambientWorkSamples[i]++;
 	if (++g_ambientSurveyIndex >= RF_CHANNEL_HISTORY_POOL_COUNT) {
 		g_ambientSurveyIndex = 0;
 		g_ambientSurveyPass++;
@@ -1277,14 +1326,35 @@ static void rfAmbientSurveyTask()
 	if (g_ambientSurveyPass < RF_AMBIENT_SURVEY_PASSES)
 		return;
 
-	if (rfAmbientSurveyComplete()) {
-		memcpy(g_ambientStableRssi, g_ambientWorkRssi,
-		       sizeof g_ambientStableRssi);
-		g_ambientStableValid = true;
-		g_ambientSurveyGeneration++;
-		g_ambientSurveyLastCompleteMs = now;
+	if (!rfAmbientSurveyComplete()) {
+		uint8_t failedChannel = 0;
+		for (uint8_t j = 0; j < RF_CHANNEL_HISTORY_POOL_COUNT; j++)
+			if (!g_ambientWorkSamples[j]) {
+				failedChannel = g_recoveryChannelPool[j];
+				break;
+			}
+		const bool reportFailure = g_ambientSurveyManual;
+		g_ambientSurveyFailure =
+			reportFailure ? RF_AMBIENT_SURVEY_FAIL_INCOMPLETE :
+					RF_AMBIENT_SURVEY_FAIL_NONE;
+		g_ambientSurveyFailureChannel = reportFailure ? failedChannel :
+								0u;
+		g_ambientSurveyLastAttemptMs = now;
+		rfAmbientSurveyAbort();
+		g_ambientSurveyPending = false;
+		g_ambientSurveyManual = false;
+		return;
 	}
+	memcpy(g_ambientStableRssi, g_ambientWorkRssi,
+	       sizeof g_ambientStableRssi);
+	g_ambientStableValid = true;
+	g_ambientSurveyGeneration++;
+	g_ambientSurveyLastCompleteMs = now;
+	g_ambientSurveyLastAttemptMs = now;
+	g_ambientSurveyFailure = RF_AMBIENT_SURVEY_FAIL_NONE;
+	g_ambientSurveyFailureChannel = 0;
 	rfAmbientSurveyAbort();
+	g_ambientSurveyPending = false;
 	g_ambientSurveyManual = false;
 }
 
@@ -1494,6 +1564,9 @@ void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 			seconds > 0xFFu ? 0xFFu : (uint8_t)seconds;
 	}
 	status->recoveryFailedTarget = g_recoveryLastFailedTarget;
+	status->ambientSurveyRetry = g_ambientSurveySampleRetry;
+	status->ambientSurveyFailure = g_ambientSurveyFailure;
+	status->ambientSurveyFailureChannel = g_ambientSurveyFailureChannel;
 	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++) {
 		RfChannelStatusEntry &entry = status->channel[i];
 		entry.channel = g_recoveryChannelPool[i];
@@ -2371,6 +2444,12 @@ bool rfRecoveryRequestJournalBuilder()
 		return false;
 	}
 
+	if (g_ambientSurveyRunning)
+		rfAmbientSurveyAbort();
+	g_ambientSurveyPending = false;
+	g_ambientSurveyManual = false;
+	g_ambientSurveyFailure = RF_AMBIENT_SURVEY_FAIL_NONE;
+	g_ambientSurveyFailureChannel = 0;
 	rfJournalBuilderResetAll();
 	g_rfJournalBuilderParticipants = liveMask;
 	g_rfJournalBuilderOriginChannel = g_sessCh;
@@ -2473,6 +2552,14 @@ static void rfJournalBuilderTask()
 
 	switch (g_rfJournalBuilderPhase) {
 	case RF_JOURNAL_BUILDER_SURVEY:
+		if (g_rfJournalBuilderSurveyStarted &&
+		    g_ambientSurveyFailure != RF_AMBIENT_SURVEY_FAIL_NONE) {
+			g_rfJournalBuilderFailure =
+				RF_JOURNAL_BUILDER_FAIL_AMBIENT_SURVEY;
+			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_FAILED,
+						 now);
+			return;
+		}
 		if (!rfJournalBuilderIdleQueryComplete()) {
 			(void)rfJournalBuilderIdlePrepare(now);
 			return;
@@ -3523,57 +3610,21 @@ void rfHopTo(uint8_t newCh)
 	(void)rfChannelGroupBegin(g_sessCh, newCh, mask, now, false);
 }
 
-bool rfRecoveryRequestManualHop(uint8_t channel)
+bool rfRecoveryRequestHop(uint8_t channel)
 {
 	if (rfJournalBuilderActive() || rfIdleTimeoutTestBusy() ||
 	    rfChannelHistoryPoolIndex(channel) < 0)
 		return false;
 	if (channel == g_sessCh)
 		return true;
-
-	// Like Builder admission, an explicit manual hop may supersede only an
-	// automatic recovery that is still waiting for neutral before any E4
-	// authorization. Every later handoff phase remains non-preemptible.
-	if (g_rfChGroupActive && g_rfChGroupPhase == RF_GROUP_HOP_PENDING &&
-	    !g_rfChHandoffManualImmediate)
-		rfChannelGroupAbort();
 	if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
-		return false;
-
-	// An accepted manual hop owns the radio over any standalone ambient survey.
-	// Builder cannot reach this path, so its intentional survey remains protected.
-	if (g_ambientSurveyRunning)
-		rfAmbientSurveyAbort();
-	g_ambientSurveyPending = false;
-	g_ambientSurveyManual = false;
-
-	const unsigned long now = millis();
-	// Manual selection starts a fresh QoS residence. Disarm any stale automatic
-	// target, discard prior-channel bad streaks, and grant the normal residency
-	// interval even if this manual attempt later rolls back to the old channel.
-	(void)rfChannelRecoverySetTarget(0u);
-	g_recoveryCooldownUntilMs = 0;
-	g_recoveryFailedTargetMask = 0;
-	g_recoveryLastFailedTarget = 0;
-	g_recoveryResidenceChannel = g_sessCh;
-	g_recoveryRequestedThisResidence = false;
-	g_channelRecoveryDecidedThisResidence = false;
-	for (int s = 0; s < NSLOT; s++)
-		g_linkQualityBadStreak[s] = 0;
-	g_qosLastHopMs = now;
-
-	return rfJournalBuilderImmediateHop(channel);
-}
-
-bool rfRecoveryRequestTestAutomaticHop(uint8_t channel)
-{
-	if (rfJournalBuilderActive() || rfIdleTimeoutTestBusy() ||
-	    rfChannelHistoryPoolIndex(channel) < 0 || channel == g_sessCh ||
-	    g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
 		return false;
 	const unsigned long now = millis();
 	if (!rfChannelLiveMask(now))
 		return false;
+	// A user-selected Hop uses the production automatic handoff path: freeze
+	// the live cohort, require a fresh report from every participant, and honor
+	// the continuously accumulated 250-ms neutral dwell before E4.
 	if (g_ambientSurveyRunning)
 		rfAmbientSurveyAbort();
 	g_ambientSurveyPending = false;

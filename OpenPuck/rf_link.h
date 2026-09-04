@@ -154,6 +154,12 @@ enum RfRecoveryWaitReason : uint8_t {
 	RF_RECOVERY_WAIT_NEUTRAL_DWELL = 3,
 };
 
+enum RfAmbientSurveyFailure : uint8_t {
+	RF_AMBIENT_SURVEY_FAIL_NONE = 0,
+	RF_AMBIENT_SURVEY_FAIL_SAMPLE_TIMEOUT = 1,
+	RF_AMBIENT_SURVEY_FAIL_INCOMPLETE = 2,
+};
+
 enum RfJournalBuilderPhase : uint8_t {
 	RF_JOURNAL_BUILDER_IDLE = 0,
 	RF_JOURNAL_BUILDER_SURVEY = 1,
@@ -205,11 +211,13 @@ struct RfRecoveryStatus {
 	uint16_t handoffNeutralMs;
 	uint8_t recoveryCooldownSeconds;
 	uint8_t recoveryFailedTarget;
+	uint8_t ambientSurveyRetry;
+	uint8_t ambientSurveyFailure;
+	uint8_t ambientSurveyFailureChannel;
 };
 
-void rfRecoveryRequestAmbientSurvey();
-bool rfRecoveryRequestManualHop(uint8_t channel);
-bool rfRecoveryRequestTestAutomaticHop(uint8_t channel);
+bool rfRecoveryRequestAmbientSurvey();
+bool rfRecoveryRequestHop(uint8_t channel);
 bool rfRecoveryRequestJournalBuilder();
 void rfRecoveryCancelJournalBuilder();
 bool rfRecoveryRequestIdleTimeoutRead();

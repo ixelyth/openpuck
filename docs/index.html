@@ -282,7 +282,7 @@
         <button id="rfSurvey" style="margin-left:8px">Survey Ambient RF</button>
         <button id="rfBuilder" style="margin-left:8px">Build RF Journal</button>
       </div>
-      <p class="note" style="margin-top:10px"><strong>Hop</strong> immediately negotiates the channel change for every live controller.<br><strong>Build RF Journal</strong> will initiate a comprehensive 14-channel scan to build the RF Journal ahead of time and save the winning channel as Startup.<br><strong>Startup</strong> manually saves that channel as the starting channel for subsequent boots, but automatic RF learning may replace it later.</p>
+      <p class="note" style="margin-top:10px"><strong>Hop</strong> uses the same neutral-gated coordinated channel migration as automatic RF recovery.<br><strong>Build RF Journal</strong> will initiate a comprehensive 14-channel scan to build the RF Journal ahead of time and save the winning channel as Startup.<br><strong>Startup</strong> manually saves that channel as the starting channel for subsequent boots, but automatic RF learning may replace it later.</p>
       <div class="row" style="margin-top:10px;border-top:1px solid #272d3d;padding-top:12px">
         <button id="rfIdleRead">Read Idle Timeout</button>
         <button id="rfIdleSame" style="margin-left:8px">Test Same Value · 10 min</button>
@@ -770,7 +770,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfHandoffPhase=0, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false, rfIdleTestBusy=false, rfIdleTestMode=0;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfHandoffPhase=0, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false, rfSurveyRetry=0, rfSurveyFailure=0, rfSurveyFailureChannel=0, rfIdleTestBusy=false, rfIdleTestMode=0;
 let rfHopRequestedCh=0, rfHopSawHandoff=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
@@ -798,6 +798,10 @@ function applyRfStatus(p){
   const neutralMs=p.length>=autoBase+5?(p[autoBase+1]|(p[autoBase+2]<<8)):0;
   const recoveryCooldown=p.length>=autoBase+5?p[autoBase+3]:0;
   const recoveryFailedTarget=p.length>=autoBase+5?p[autoBase+4]:0;
+  const surveyDiagBase=autoBase+5;
+  const surveyRetry=p.length>=surveyDiagBase+3?p[surveyDiagBase]:0;
+  const surveyFailure=p.length>=surveyDiagBase+3?p[surveyDiagBase+1]:0;
+  const surveyFailureChannel=p.length>=surveyDiagBase+3?p[surveyDiagBase+2]:0;
   const hopPhaseText=["Idle","Waiting for neutral","Authorizing","Switching","Acquiring","Reconciling","Rolling back","Reacquiring"];
   let hopText=hopPhaseText[hopPhase]||("Phase "+hopPhase);
   if(hopPhase===1){
@@ -830,7 +834,7 @@ function applyRfStatus(p){
   const idleMask=p.length>=idleBase+17?p[idleBase+14]:0;
   const idleOfflineMask=p.length>=idleBase+17?p[idleBase+15]:0;
   const idleFailure=p.length>=idleBase+17?p[idleBase+16]:0;
-  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write could not be completed","could not read controller idle timeout","startup save failed"];
+  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write could not be completed","could not read controller idle timeout","startup save failed","ambient survey failed"];
   let builderText="Idle";
   if(builderPhase===1) builderText="Preparing controllers / ambient survey";
   else if(builderPhase===2) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · hopping to Ch ${builderChannel}`;
@@ -883,9 +887,13 @@ function applyRfStatus(p){
   rfSurveyRunning=running;
   rfSurveyPending=pending;
   rfSurveyGeneration=generation;
+  rfSurveyRetry=surveyRetry;
+  rfSurveyFailure=surveyFailure;
+  rfSurveyFailureChannel=surveyFailureChannel;
   if(rfHopPending&&handoff) rfHopSawHandoff=true;
   if(rfHopPending&&!rfHopRequestedCh&&!handoff) rfHopPending=false;
-  $("#rfSurveyState").textContent=running?(surveyChannel?`surveying Ch ${surveyChannel}`:"surveying"):pending?(handoff?"queued for handoff":"surveying"):ambient?`cached #${generation}`:"not sampled";
+  const surveyFailureText=["","sample timeout","incomplete scan"];
+  $("#rfSurveyState").textContent=running?(surveyRetry&&surveyChannel?`retrying Ch ${surveyChannel} · ${surveyRetry}/5`:surveyChannel?`surveying Ch ${surveyChannel}`:"surveying"):pending?(handoff?"queued for handoff":"starting survey"):surveyFailure?`failed${surveyFailureChannel?` · Ch ${surveyFailureChannel}`:""} · ${surveyFailureText[surveyFailure]||(`code ${surveyFailure}`)}`:ambient?`cached #${generation}`:"not sampled";
   const body=$("#rfJournalBody"), bars=$("#rfAmbientBars"); body.innerHTML=""; bars.innerHTML=""; rfPoolChannels=new Set();
   for(let i=0;i<count;i++){
     const q=13+i*9; if(q+9>p.length) break;
@@ -898,21 +906,11 @@ function applyRfStatus(p){
     const hopBtn=document.createElement("button");
     hopBtn.textContent=ch===current?"Active":"Hop";
     hopBtn.dataset.rfHop="1";
-    hopBtn.disabled=ch===current||rfManualHopWorkflowBlocked()||rfHopPending||rfBuilderActive;
+    hopBtn.disabled=ch===current||rfHopWorkflowBlocked()||rfHopPending||rfBuilderActive;
     hopBtn.style.padding="4px 8px";
     hopBtn.dataset.rfCurrent=ch===current?"1":"0";
-    hopBtn.addEventListener("click",()=>manualHopRf(ch));
+    hopBtn.addEventListener("click",()=>hopRf(ch));
     hopCell.appendChild(hopBtn);
-    const autoHopBtn=document.createElement("button");
-    autoHopBtn.textContent="Test Auto Hop";
-    autoHopBtn.dataset.rfAutoHop="1";
-    autoHopBtn.dataset.rfCurrent=ch===current?"1":"0";
-    autoHopBtn.disabled=ch===current||rfHopPending||rfBuilderActive||rfIdleTestBusy||rfHandoffActive;
-    autoHopBtn.style.padding="4px 8px";
-    autoHopBtn.style.marginLeft="6px";
-    autoHopBtn.title="Test-only: use the production automatic neutral-gated handoff path";
-    autoHopBtn.addEventListener("click",()=>testAutoHopRf(ch));
-    hopCell.appendChild(autoHopBtn);
     const startupBtn=document.createElement("button");
     startupBtn.textContent=ch===startup?"Startup ✓":"Startup";
     startupBtn.disabled=ch===startup;
@@ -936,11 +934,11 @@ function rfBuilderWorkflowBlocked(){
   // handoff phase remains non-preemptible.
   return (rfHandoffActive||rfHopPending) && !(rfHandoffActive&&rfHandoffPhase===1);
 }
-function rfManualHopWorkflowBlocked(){
+function rfHopWorkflowBlocked(){
   if(rfIdleTestBusy) return true;
-  // An explicit manual hop may also replace automatic Waiting-for-neutral.
-  // Manual authorization and every post-E4 phase remain non-preemptible.
-  return rfHandoffActive&&rfHandoffPhase!==1;
+  // Hop itself now uses the production automatic neutral-gated path, so an
+  // existing handoff remains authoritative until it reaches a terminal state.
+  return rfHandoffActive;
 }
 function syncRfBuilderDisabled(){
   $("#rfBuilder").disabled=rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&rfBuilderWorkflowBlocked());
@@ -948,15 +946,12 @@ function syncRfBuilderDisabled(){
 function setRfHopButtonsDisabled(disabled){
   rfHopPending=!!disabled;
   for(const tr of $("#rfJournalBody").querySelectorAll("tr")){
-    for(const btn of tr.querySelectorAll("button[data-rf-hop],button[data-rf-auto-hop]")){
-      const autoTest=btn.dataset.rfAutoHop==="1";
-      btn.disabled=rfHopPending||rfBuilderActive||btn.dataset.rfCurrent==="1"||
-        (autoTest?(rfIdleTestBusy||rfHandoffActive):rfManualHopWorkflowBlocked());
-    }
+    for(const btn of tr.querySelectorAll("button[data-rf-hop]"))
+      btn.disabled=rfHopPending||rfBuilderActive||btn.dataset.rfCurrent==="1"||rfHopWorkflowBlocked();
   }
   // Keep the Builder interlock synchronized with the local Hop latch as well
   // as firmware handoff state. The terminal status frame arrives before the
-  // manual-Hop finally block releases rfHopPending, so applyRfStatus() may have
+  // Hop finally block releases rfHopPending, so applyRfStatus() may have
   // left this DOM button disabled using the old latch value.
   syncRfBuilderDisabled();
 }
@@ -975,8 +970,8 @@ async function waitRfUiIdle(){
   for(let i=0;i<100&&rfBusy&&dev;i++) await new Promise(resolve=>setTimeout(resolve,50));
   return !!dev&&!rfBusy;
 }
-async function manualHopRf(ch){
-  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfHopPending||rfManualHopWorkflowBlocked()) return;
+async function hopRf(ch){
+  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfHopPending||rfBuilderActive||rfHopWorkflowBlocked()) return;
   setRfHopButtonsDisabled(true);
   rfHopRequestedCh=ch;
   rfHopSawHandoff=false;
@@ -989,78 +984,10 @@ async function manualHopRf(ch){
     return;
   }
   rfBusy=true;
-  let terminal=false;
-  try{
-    await waitIdle(); if(!dev) return;
-    await send([0x02,99,ch]);
-    let p=await readFrame(0xAD,13,256), sawStatus=!!p, lastActive=false;
-    // Firmware's longest normal rollback path is longer than a simple clean
-    // acquisition, and USB/browser scheduling adds jitter. Follow firmware
-    // state rather than declaring an RF failure from a short UI stopwatch.
-    for(let i=0;i<100;i++){
-      if(p){
-        sawStatus=true;
-        applyRfStatus(p);
-        const active=!!(p[1]&16), current=p[2];
-        lastActive=active;
-        if(active) rfHopSawHandoff=true;
-        if(!active&&current===ch){
-          $("#rfHandoffStatus").textContent=`Complete · Ch ${ch}`;
-          terminal=true;
-          break;
-        }
-        if(!active&&rfHopSawHandoff){
-          $("#rfHandoffStatus").textContent=`Rolled back · Ch ${current}`;
-          terminal=true;
-          break;
-        }
-        // Admission should become visible quickly. Preserve that short gate for
-        // requests that genuinely never enter the firmware handoff machine.
-        if(!active&&!rfHopSawHandoff&&i>=6){
-          $("#rfHandoffStatus").textContent=`Hop not started · stayed Ch ${current}`;
-          terminal=true;
-          break;
-        }
-      }
-      await new Promise(resolve=>setTimeout(resolve,100));
-      await send([0x02,97,1]);
-      p=await readFrame(0xAD,13,256);
-    }
-    if(!terminal){
-      if(lastActive) $("#rfHandoffStatus").textContent=`Handoff still active · Ch ${ch}`;
-      else if(!sawStatus) $("#rfHandoffStatus").textContent="Hop outcome unknown · RF status unavailable";
-      else $("#rfHandoffStatus").textContent=`Hop outcome unknown · Ch ${ch}`;
-    }
-    rfLastRefresh=Date.now();
-  }catch(e){
-    $("#rfHandoffStatus").textContent=`Hop error · Ch ${ch}`;
-    log("RF hop err: "+e.message);
-  }
-  finally{
-    rfBusy=false;
-    rfHopRequestedCh=0;
-    setRfHopButtonsDisabled(rfHandoffActive);
-  }
-}
-
-async function testAutoHopRf(ch){
-  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfHopPending||rfBuilderActive||rfIdleTestBusy||rfHandoffActive) return;
-  setRfHopButtonsDisabled(true);
-  rfHopRequestedCh=ch;
-  rfHopSawHandoff=false;
-  showRfHopTarget(ch);
-  $("#rfHandoffStatus").textContent=`Starting automatic test · Ch ${ch}`;
-  if(!(await waitRfUiIdle())){
-    $("#rfHandoffStatus").textContent=`Test Auto not started · Ch ${ch}`;
-    rfHopRequestedCh=0;
-    setRfHopButtonsDisabled(false);
-    return;
-  }
-  rfBusy=true;
   let terminal=false, sawStatus=false;
   try{
     await waitIdle(); if(!dev) return;
-    await send([0x02,106,ch]);
+    await send([0x02,99,ch]);
     let p=await readFrame(0xAD,13,256);
     for(let i=0;i<1200&&dev;i++){
       if(p){
@@ -1070,23 +997,24 @@ async function testAutoHopRf(ch){
         if(active) rfHopSawHandoff=true;
         if(!active&&current===ch){ $("#rfHandoffStatus").textContent=`Complete · Ch ${ch}`; terminal=true; break; }
         if(!active&&rfHopSawHandoff){ $("#rfHandoffStatus").textContent=`Rolled back · Ch ${current}`; terminal=true; break; }
-        if(!active&&!rfHopSawHandoff&&i>=6){ $("#rfHandoffStatus").textContent=`Test Auto not started · stayed Ch ${current}`; terminal=true; break; }
+        if(!active&&!rfHopSawHandoff&&i>=6){ $("#rfHandoffStatus").textContent=`Hop not started · stayed Ch ${current}`; terminal=true; break; }
       }
       await new Promise(resolve=>setTimeout(resolve,100));
       await send([0x02,97,1]);
       p=await readFrame(0xAD,13,256);
     }
-    if(!terminal&&dev) $("#rfHandoffStatus").textContent=sawStatus?"Test Auto still pending · refresh RF status":"Test Auto status unavailable";
+    if(!terminal&&dev) $("#rfHandoffStatus").textContent=sawStatus?`Handoff still pending · Ch ${ch}`:"Hop status unavailable";
     if(sawStatus) rfLastRefresh=Date.now();
   }catch(e){
-    $("#rfHandoffStatus").textContent=`Test Auto error · Ch ${ch}`;
-    log("RF automatic-hop test err: "+e.message);
+    $("#rfHandoffStatus").textContent=`Hop error · Ch ${ch}`;
+    log("RF hop err: "+e.message);
   }finally{
     rfBusy=false;
     rfHopRequestedCh=0;
     setRfHopButtonsDisabled(rfHandoffActive);
   }
 }
+
 async function manualStartupRf(ch){
   if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)) return;
   if(!(await waitRfUiIdle())) return;
@@ -1158,8 +1086,7 @@ async function manualJournalBuilderRf(){
 }
 async function manualSurveyRf(){
   if(!dev||isDongle||!rfCapable||rfSurveyWatchActive) return;
-  $("#rfSurveyState").textContent="surveying";
-  $("#rfSurveyNote").textContent="Surveying.";
+  $("#rfSurveyState").textContent="requesting…";
   rfSurveyWatchActive=true;
   if(!(await waitRfUiIdle())){ rfSurveyWatchActive=false; return; }
   rfBusy=true;
@@ -1168,12 +1095,10 @@ async function manualSurveyRf(){
   try{
     await waitIdle(); if(!dev) return;
     await send([0x02,98,1]);
-    // The scanner advances every 100 ms. While this explicit survey owns the
-    // vendor endpoint, poll RF status faster than that so pending->running and
-    // each sampled channel can be painted instead of aliasing against the
-    // normal 600-ms panel poll. RF control fields reply only with 0xAD, so the
-    // shared bulk-IN stream cannot phase-shift against a generic 0xA5 acknowledgement.
-    for(let i=0;i<300&&dev;i++){
+    // A successful request is reflected immediately as pending/running in the
+    // dedicated RF-status frame. Poll faster than the 100-ms scanner step so
+    // per-channel progress and retries remain visible.
+    for(let i=0;i<400&&dev;i++){
       const p=await readFrame(0xAD,13,256);
       if(p){
         sawStatus=true;
@@ -1181,7 +1106,10 @@ async function manualSurveyRf(){
         const generation=p[7]|(p[8]<<8);
         applyRfStatus(p);
         if(running||pending) sawSurvey=true;
-        if(!running&&!pending&&(sawSurvey||generation!==startGeneration)){
+        if(rfSurveyFailure){ terminal=true; break; }
+        if(!running&&!pending&&generation!==startGeneration){ terminal=true; break; }
+        if(!running&&!pending&&!sawSurvey&&i>=2){
+          $("#rfSurveyState").textContent="Survey not started · RF workflow busy";
           terminal=true;
           break;
         }
@@ -1190,11 +1118,14 @@ async function manualSurveyRf(){
       await send([0x02,97,1]);
     }
     if(!terminal){
-      if(rfSurveyRunning||rfSurveyPending) $("#rfSurveyNote").textContent="Survey still active; status updates will continue.";
-      else if(!sawStatus) $("#rfSurveyNote").textContent="Survey status unavailable; refresh RF status to verify completion.";
+      if(rfSurveyRunning||rfSurveyPending) $("#rfSurveyState").textContent=rfSurveyRunning?"Survey still active":"Survey queued";
+      else if(!sawStatus) $("#rfSurveyState").textContent="Survey status unavailable";
     }
     if(sawStatus) rfLastRefresh=Date.now();
-  }catch(e){ log("RF survey err: "+e.message); }
+  }catch(e){
+    $("#rfSurveyState").textContent="Survey error";
+    log("RF survey err: "+e.message);
+  }
   finally{ rfBusy=false; rfSurveyWatchActive=false; }
 }
 async function refreshRfStatus(survey=false){
