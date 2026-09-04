@@ -2671,7 +2671,13 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 
 	if (g_rfChGroupPhase == RF_GROUP_HOP_PENDING) {
 		if (g_rfChHandoffManualImmediate) {
-			if (rfChannelLiveMask(now) != g_rfChGroupParticipants) {
+			// The manual cohort is frozen when the request is accepted. A
+			// participant aging out after that point is adjudicated by its E4
+			// response instead of aborting before authorization starts. A new
+			// recently-heard controller outside the frozen cohort is different:
+			// do not strand it on the old channel.
+			if (rfChannelLiveMask(now) &
+			    (uint8_t)~g_rfChGroupParticipants) {
 				rfChannelGroupAbort();
 				return;
 			}

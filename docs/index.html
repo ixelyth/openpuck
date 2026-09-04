@@ -765,6 +765,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 
 // ---- RF recovery / journal status ----
 let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false, rfSurveyRunning=false;
+let rfHopRequestedCh=0, rfHopSawHandoff=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
 function rfChLabel(ch){ return ch ? `Ch ${ch} · ${2400+ch} MHz` : "—"; }
@@ -788,7 +789,7 @@ function applyRfStatus(p){
   if(hopPhase===2||hopPhase===3||hopPhase===4) hopText+=(target?` Ch ${target}`:"");
   else if(hopPhase>=5) hopText+=(hopOld?` Ch ${hopOld}`:"");
   if(hopPhase) hopText+=` · ${hopElapsed} ms`;
-  $("#rfHandoffStatus").textContent=hopText;
+  if(hopPhase||!rfHopPending) $("#rfHandoffStatus").textContent=hopText;
   const builderBase=tail+4;
   const builderPhase=p.length>=builderBase+7?p[builderBase]:0;
   const builderIndex=p.length>=builderBase+7?p[builderBase+1]:0;
@@ -820,7 +821,7 @@ function applyRfStatus(p){
   $("#rfSurvey").disabled=rfBuilderActive;
   rfHandoffActive=handoff;
   rfSurveyRunning=running;
-  if(rfHopPending&&!handoff) rfHopPending=false;
+  if(rfHopPending&&handoff) rfHopSawHandoff=true;
   $("#rfSurveyState").textContent=running?(surveyChannel?`surveying Ch ${surveyChannel}`:"surveying"):pending?(handoff?"queued for handoff":"surveying"):ambient?`cached #${generation}`:"not sampled";
   $("#rfSurveyNote").textContent=handoff&&pending?"Survey queued until the current RF hop or rollback completes.":running&&surveyChannel?`Surveying Ch ${surveyChannel}.`:running?"Surveying.":pending?"Surveying.":"Click Survey to sample now.";
   const body=$("#rfJournalBody"), bars=$("#rfAmbientBars"); body.innerHTML=""; bars.innerHTML=""; rfPoolChannels=new Set();
@@ -880,28 +881,62 @@ async function waitRfUiIdle(){
 async function manualHopRf(ch){
   if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfHopPending||rfHandoffActive) return;
   setRfHopButtonsDisabled(true);
+  rfHopRequestedCh=ch;
+  rfHopSawHandoff=false;
   showRfHopTarget(ch);
-  if(!(await waitRfUiIdle())){ setRfHopButtonsDisabled(false); return; }
+  $("#rfHandoffStatus").textContent=`Requesting Ch ${ch}`;
+  if(!(await waitRfUiIdle())){
+    $("#rfHandoffStatus").textContent=`Hop not started · Ch ${ch}`;
+    rfHopRequestedCh=0;
+    setRfHopButtonsDisabled(false);
+    return;
+  }
   rfBusy=true;
+  let terminal=false;
   try{
     await waitIdle(); if(!dev) return;
     await send([0x02,99,ch]);
     const ack=await readBlob(); if(ack) applyBlob(ack);
-    let p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
-    // The command reply is normally captured while the handoff is still active.
-    // Follow it to completion so the next manual Hop becomes available promptly
-    // instead of leaving the buttons frozen on that transient status snapshot.
-    for(let i=0;i<30&&(!p||(p[1]&16));i++){
+    let p=await readFrame(0xAD,13,256);
+    for(let i=0;i<40;i++){
+      if(p){
+        applyRfStatus(p);
+        const active=!!(p[1]&16), current=p[2];
+        if(active) rfHopSawHandoff=true;
+        if(!active&&current===ch){
+          $("#rfHandoffStatus").textContent=`Complete · Ch ${ch}`;
+          terminal=true;
+          break;
+        }
+        if(!active&&rfHopSawHandoff){
+          $("#rfHandoffStatus").textContent=`Rolled back · Ch ${current}`;
+          terminal=true;
+          break;
+        }
+        // Do not treat the first idle snapshot as an acknowledgement. Give the
+        // firmware several status cycles to enter the handoff before declaring
+        // that the request never started.
+        if(!active&&!rfHopSawHandoff&&i>=4){
+          $("#rfHandoffStatus").textContent=`Hop not started · stayed Ch ${current}`;
+          terminal=true;
+          break;
+        }
+      }
       await new Promise(resolve=>setTimeout(resolve,100));
       await send([0x02,97,1]);
       const statusAck=await readBlob(); if(statusAck) applyBlob(statusAck);
-      p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+      p=await readFrame(0xAD,13,256);
     }
+    if(!terminal) $("#rfHandoffStatus").textContent=`Hop timed out · Ch ${ch}`;
     rfLastRefresh=Date.now();
-  }catch(e){ log("RF hop err: "+e.message); }
+  }catch(e){
+    $("#rfHandoffStatus").textContent=`Hop error · Ch ${ch}`;
+    log("RF hop err: "+e.message);
+  }
   finally{
     rfBusy=false;
-    if(!rfHandoffActive) setRfHopButtonsDisabled(false);
+    rfHopRequestedCh=0;
+    setRfHopButtonsDisabled(false);
   }
 }
 async function manualStartupRf(ch){
