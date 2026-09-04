@@ -147,6 +147,13 @@ enum RfRecoveryHandoffPhase : uint8_t {
 	RF_RECOVERY_HANDOFF_ACQUIRE_OLD = 7,
 };
 
+enum RfRecoveryWaitReason : uint8_t {
+	RF_RECOVERY_WAIT_NONE = 0,
+	RF_RECOVERY_WAIT_FRESH_REPORT = 1,
+	RF_RECOVERY_WAIT_INPUT_ACTIVE = 2,
+	RF_RECOVERY_WAIT_NEUTRAL_DWELL = 3,
+};
+
 enum RfJournalBuilderPhase : uint8_t {
 	RF_JOURNAL_BUILDER_IDLE = 0,
 	RF_JOURNAL_BUILDER_SURVEY = 1,
@@ -194,10 +201,15 @@ struct RfRecoveryStatus {
 	uint8_t idleTestParticipantMask;
 	uint8_t idleTestOfflineMask;
 	uint8_t idleTestFailure;
+	uint8_t handoffWaitReason;
+	uint16_t handoffNeutralMs;
+	uint8_t recoveryCooldownSeconds;
+	uint8_t recoveryFailedTarget;
 };
 
 void rfRecoveryRequestAmbientSurvey();
 bool rfRecoveryRequestManualHop(uint8_t channel);
+bool rfRecoveryRequestTestAutomaticHop(uint8_t channel);
 bool rfRecoveryRequestJournalBuilder();
 void rfRecoveryCancelJournalBuilder();
 bool rfRecoveryRequestIdleTimeoutRead();

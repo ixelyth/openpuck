@@ -74,6 +74,7 @@ unsigned long g_linkQualityCheckMs = 0, g_lastChannelHopMs = 0;
 #define RF_LINK_QUALITY_BAD_SUCCESS_PERMILLE 550u
 #define RF_LINK_QUALITY_BAD_STREAK_WINDOWS 3u
 #define RF_LINK_QUALITY_MIN_RESIDENCY_MS 10000u
+#define RF_CHANNEL_RECOVERY_RETRY_COOLDOWN_MS 30000u
 static uint32_t g_linkQualityPolls[NSLOT] = {};
 static uint32_t g_linkQualityReplies[NSLOT] = {};
 static uint8_t g_linkQualityBadStreak[NSLOT] = {};
@@ -82,6 +83,9 @@ static uint8_t g_linkQualityBadStreak[NSLOT] = {};
 static uint8_t g_recoveryTargetChannel = 0;
 static uint8_t g_recoveryResidenceChannel = 0;
 static bool g_recoveryRequestedThisResidence = false;
+static unsigned long g_recoveryCooldownUntilMs = 0;
+static uint64_t g_recoveryFailedTargetMask = 0;
+static uint8_t g_recoveryLastFailedTarget = 0;
 
 #define RF_RECOVERY_CHANNEL_MIN 4u
 #define RF_RECOVERY_CHANNEL_MAX 80u
@@ -186,6 +190,7 @@ enum RfJournalBuilderFailure : uint8_t {
 	RF_JOURNAL_BUILDER_FAIL_SAVE = 6,
 	RF_JOURNAL_BUILDER_FAIL_JOURNAL_WRITE_BUSY = 7,
 	RF_JOURNAL_BUILDER_FAIL_IDLE_TIMEOUT_QUERY = 8,
+	RF_JOURNAL_BUILDER_FAIL_STARTUP_SAVE = 9,
 };
 
 static uint8_t g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_IDLE;
@@ -265,6 +270,10 @@ static unsigned long g_rfIdleTestLastPulseMs = 0;
 
 static void rfLinkQualityResetWindow(int slot);
 static void rfChannelEvidenceSyncResidence();
+static bool rfRecoveryTargetFailed(uint8_t ch);
+static bool rfChannelRecoveryCooldownActive(unsigned long now);
+static void rfChannelRecoveryAbandonAutomaticAttempt(uint8_t target,
+						     unsigned long now);
 static void rfChannelGroupAbort();
 static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 				unsigned long now, bool manualImmediate);
@@ -687,6 +696,9 @@ static uint32_t g_rfHopInputSeq[NSLOT] = {};
 #define RF_CHANNEL_HANDOFF_INPUT_REPORT_FRESH_MS 100u
 static uint32_t g_rfHopInputReportSeq[NSLOT] = {};
 static unsigned long g_rfHopInputLastReportMs[NSLOT] = {};
+static unsigned long g_rfHopInputNeutralSinceMs[NSLOT] = {};
+static uint8_t g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_NONE;
+static uint16_t g_rfChHandoffNeutralMs = 0;
 
 // One group coordinator handles every frozen live-controller cohort, including a cohort of one.
 enum RfChannelGroupPhase : uint8_t {
@@ -943,6 +955,9 @@ static void rfChannelRecoverySyncResidence()
 		return;
 	g_recoveryResidenceChannel = g_sessCh;
 	g_recoveryRequestedThisResidence = false;
+	g_recoveryCooldownUntilMs = 0;
+	g_recoveryFailedTargetMask = 0;
+	g_recoveryLastFailedTarget = 0;
 }
 
 static int rfRecoveryChannelIndex(uint8_t ch)
@@ -951,6 +966,44 @@ static int rfRecoveryChannelIndex(uint8_t ch)
 	    (ch & 1u))
 		return -1;
 	return (int)((ch - RF_RECOVERY_CHANNEL_MIN) >> 1);
+}
+
+static uint64_t rfRecoveryTargetBit(uint8_t ch)
+{
+	const int index = rfRecoveryChannelIndex(ch);
+	return index >= 0 ? ((uint64_t)1u << index) : 0;
+}
+
+static bool rfRecoveryTargetFailed(uint8_t ch)
+{
+	const uint64_t bit = rfRecoveryTargetBit(ch);
+	return bit && (g_recoveryFailedTargetMask & bit);
+}
+
+static bool rfChannelRecoveryCooldownActive(unsigned long now)
+{
+	return g_recoveryCooldownUntilMs &&
+	       (int32_t)(g_recoveryCooldownUntilMs - now) > 0;
+}
+
+static void rfChannelRecoveryAbandonAutomaticAttempt(uint8_t target,
+						     unsigned long now)
+{
+	const uint64_t bit = rfRecoveryTargetBit(target);
+	if (bit)
+		g_recoveryFailedTargetMask |= bit;
+	g_recoveryLastFailedTarget = target;
+	g_recoveryTargetChannel = 0;
+	g_recoveryResidenceChannel = g_sessCh;
+	g_recoveryRequestedThisResidence = false;
+	g_channelRecoveryDecidedThisResidence = false;
+	g_recoveryCooldownUntilMs = now + RF_CHANNEL_RECOVERY_RETRY_COOLDOWN_MS;
+	for (int s = 0; s < NSLOT; s++) {
+		rfLinkQualityResetWindow(s);
+		g_linkQualityBadStreak[s] = 0;
+	}
+	g_linkQualityCheckMs = now;
+	g_qosCheckMs = now;
 }
 
 static void rfStartupChannelBeginObservation(int slot)
@@ -1020,6 +1073,8 @@ rfStartupChannelMaybePersist(const RfStartupChannelObservation &observation)
 static void rfChannelRecoveryRequest(bool wouldPending)
 {
 	rfChannelRecoverySyncResidence();
+	if (rfChannelRecoveryCooldownActive(millis()))
+		return;
 	if (!wouldPending || g_recoveryRequestedThisResidence)
 		return;
 	if (g_recoveryTargetChannel == 0u ||
@@ -1028,11 +1083,12 @@ static void rfChannelRecoveryRequest(bool wouldPending)
 	if (g_rfChHandoffState != RF_CH_IDLE)
 		return;
 
-	// Allow one autonomous request per channel residence. Set the latch before
-	// rfHopTo() so a failed stay-old result cannot hammer requests.
+	// Allow one autonomous request per independently demonstrated degradation
+	// episode. A failed stay-old result clears this latch only behind the retry
+	// cooldown and resets the bad-window streak, so retries require fresh proof.
 	g_recoveryRequestedThisResidence = true;
-	// A recovery request requires a new decode-latched activity event followed
-	// by at least 250 ms neutral before any E4 authorization attempt.
+	// Automatic admission uses the continuously maintained neutral duration.
+	// A fresh post-request report from every frozen participant is still required.
 	rfHopTo(g_recoveryTargetChannel);
 }
 
@@ -1253,6 +1309,8 @@ static uint8_t rfChannelHistorySelectGoodPrior(uint8_t current)
 	uint8_t best = 0;
 	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++) {
 		const uint8_t ch = g_recoveryChannelPool[i];
+		if (rfRecoveryTargetFailed(ch))
+			continue;
 		if (ch == current ||
 		    rfChannelHistoryDesignation(i) != RF_CHANNEL_GOOD)
 			continue;
@@ -1285,6 +1343,7 @@ static uint8_t rfChannelHistorySelectUnexplored(uint8_t current)
 		const uint8_t i = (uint8_t)((g_hopIdx + step) %
 					    RF_CHANNEL_HISTORY_POOL_COUNT);
 		if (g_recoveryChannelPool[i] == current ||
+		    rfRecoveryTargetFailed(g_recoveryChannelPool[i]) ||
 		    g_channelHistoryPersistentTrials[i])
 			continue;
 		if (best < 0 ||
@@ -1306,6 +1365,7 @@ rfChannelHistorySelectBestRemaining(uint8_t current,
 	int best = -1;
 	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++) {
 		if (g_recoveryChannelPool[i] == current ||
+		    rfRecoveryTargetFailed(g_recoveryChannelPool[i]) ||
 		    !g_channelHistoryPersistentTrials[i])
 			continue;
 		const uint16_t priorWorst =
@@ -1423,6 +1483,17 @@ void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 	status->idleTestParticipantMask = g_rfIdleTestParticipantMask;
 	status->idleTestOfflineMask = g_rfIdleTestOfflineMask;
 	status->idleTestFailure = g_rfIdleTestFailure;
+	status->handoffWaitReason = g_rfChHandoffWaitReason;
+	status->handoffNeutralMs = g_rfChHandoffNeutralMs;
+	const unsigned long statusNow = millis();
+	if (rfChannelRecoveryCooldownActive(statusNow)) {
+		const uint32_t remaining =
+			(uint32_t)(g_recoveryCooldownUntilMs - statusNow);
+		const uint32_t seconds = (remaining + 999u) / 1000u;
+		status->recoveryCooldownSeconds =
+			seconds > 0xFFu ? 0xFFu : (uint8_t)seconds;
+	}
+	status->recoveryFailedTarget = g_recoveryLastFailedTarget;
 	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++) {
 		RfChannelStatusEntry &entry = status->channel[i];
 		entry.channel = g_recoveryChannelPool[i];
@@ -2555,6 +2626,14 @@ static void rfJournalBuilderTask()
 		}
 		if (!g_channelJournalJobActive &&
 		    !g_channelHistoryPersistentDirty) {
+			if (!saveRfStartupLastGoodChannel(
+				    g_rfJournalBuilderBestChannel)) {
+				g_rfJournalBuilderFailure =
+					RF_JOURNAL_BUILDER_FAIL_STARTUP_SAVE;
+				rfJournalBuilderSetPhase(
+					RF_JOURNAL_BUILDER_FAILED, now);
+				return;
+			}
 			g_rfJournalBuilderParticipants = 0;
 			g_rfJournalBuilderChannel =
 				g_rfJournalBuilderBestChannel;
@@ -2585,6 +2664,10 @@ static void rfChannelRecoveryResetForParticipantChange()
 {
 	g_channelEvidenceResidenceChannel = g_sessCh;
 	g_channelRecoveryDecidedThisResidence = false;
+	g_recoveryCooldownUntilMs = 0;
+	g_recoveryFailedTargetMask = 0;
+	g_recoveryLastFailedTarget = 0;
+	g_recoveryRequestedThisResidence = false;
 	if (g_rfChHandoffState == RF_CH_IDLE)
 		rfChannelRecoverySetTarget(0u);
 }
@@ -2659,7 +2742,7 @@ static uint8_t rfCohortSelectRecoveryChannel(uint8_t liveMask,
 	uint32_t bestWorstAge = 0xFFFFFFFFu;
 	for (uint8_t ch = RF_RECOVERY_CHANNEL_MIN;
 	     ch <= RF_RECOVERY_CHANNEL_MAX; ch += 2u) {
-		if (ch == g_sessCh)
+		if (ch == g_sessCh || rfRecoveryTargetFailed(ch))
 			continue;
 		const int idx = rfRecoveryChannelIndex(ch);
 		if (idx < 0)
@@ -2733,6 +2816,7 @@ static uint8_t rfCohortSelectRecoveryChannel(uint8_t liveMask,
 static void rfCohortQualityWindow(uint8_t liveMask, uint32_t now)
 {
 	rfChannelEvidenceSyncResidence();
+	const bool recoveryCooldown = rfChannelRecoveryCooldownActive(now);
 	bool allValid = true;
 	bool wouldPending = false;
 	uint16_t currentWorst = 1000u;
@@ -2750,7 +2834,9 @@ static void rfCohortQualityWindow(uint8_t liveMask, uint32_t now)
 				 successPermille <
 					 RF_LINK_QUALITY_BAD_SUCCESS_PERMILLE;
 		if (!rfJournalBuilderActive()) {
-			if (bad) {
+			if (recoveryCooldown) {
+				g_linkQualityBadStreak[s] = 0;
+			} else if (bad) {
 				if (g_linkQualityBadStreak[s] != 0xFF)
 					g_linkQualityBadStreak[s]++;
 			} else {
@@ -2767,7 +2853,7 @@ static void rfCohortQualityWindow(uint8_t liveMask, uint32_t now)
 			currentWorst = successPermille;
 		const bool residency = (uint32_t)(now - g_qosLastHopMs) >=
 				       RF_LINK_QUALITY_MIN_RESIDENCY_MS;
-		if (valid && residency &&
+		if (!recoveryCooldown && valid && residency &&
 		    g_linkQualityBadStreak[s] >=
 			    RF_LINK_QUALITY_BAD_STREAK_WINDOWS)
 			wouldPending = true;
@@ -2921,6 +3007,18 @@ static void rfChannelNoteDecodedInput(int slot, uint32_t buttons)
 		return;
 	const uint8_t activity = rfChannelDecodedActivity(slot, buttons);
 	const unsigned long reportNow = millis();
+	const bool priorFresh =
+		g_rfHopInputLastReportMs[slot] &&
+		(uint32_t)(reportNow - g_rfHopInputLastReportMs[slot]) <=
+			RF_CHANNEL_HANDOFF_INPUT_REPORT_FRESH_MS;
+	if (activity) {
+		g_rfHopInputNeutralSinceMs[slot] = 0;
+	} else if (!priorFresh || g_rfHopInputLastMask[slot] != 0u ||
+		   !g_rfHopInputNeutralSinceMs[slot]) {
+		// A stale gap is never credited as neutral time. Start (or restart)
+		// the continuous neutral interval only on a fresh decoded report.
+		g_rfHopInputNeutralSinceMs[slot] = reportNow ? reportNow : 1u;
+	}
 	g_rfHopInputLastMask[slot] = activity;
 	g_rfHopInputLastReportMs[slot] = reportNow;
 	g_rfHopInputReportSeq[slot]++;
@@ -3086,6 +3184,8 @@ static void rfChannelGroupReset()
 	g_rfChGroupNeutralStartMs = 0;
 	g_rfChHandoffManualImmediate = false;
 	g_rfChHandoffTelemetryStartedMs = 0;
+	g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_NONE;
+	g_rfChHandoffNeutralMs = 0;
 	memset(g_rfChGroupActivitySeqSeen, 0,
 	       sizeof g_rfChGroupActivitySeqSeen);
 	memset(g_rfChGroupReportSeqSeen, 0, sizeof g_rfChGroupReportSeqSeen);
@@ -3107,16 +3207,6 @@ static void rfChannelGroupResetNeutralProof()
 	g_rfChGroupNeutralSeenMask = 0;
 	g_rfChGroupNeutralStartValid = false;
 	g_rfChGroupNeutralStartMs = 0;
-}
-
-static void rfChannelGroupRearmPending()
-{
-	g_rfChGroupPhase = RF_GROUP_HOP_PENDING;
-	g_rfChHandoffState = RF_CH_HOP_PENDING;
-	g_rfChHandoffPhaseMs = millis();
-	g_rfChGroupSawActivitySincePending = false;
-	rfChannelGroupResetNeutralProof();
-	rfChannelGroupSnapshotInputSeqs(g_rfChGroupParticipants);
 }
 
 static void rfChannelGroupAbort()
@@ -3146,6 +3236,10 @@ static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 	g_rfChHandoffPhaseMs = now;
 	g_rfChHandoffRequireActivityCycle = true;
 	g_rfChHandoffManualImmediate = manualImmediate;
+	g_rfChHandoffWaitReason = manualImmediate ?
+					  RF_RECOVERY_WAIT_NONE :
+					  RF_RECOVERY_WAIT_FRESH_REPORT;
+	g_rfChHandoffNeutralMs = 0;
 
 	g_rfChGroupActive = true;
 	g_rfChGroupPhase = RF_GROUP_HOP_PENDING;
@@ -3159,77 +3253,62 @@ static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 
 static bool rfChannelGroupFreshNeutral(unsigned long now)
 {
-	// The participant set is frozen.  A join/leave while authorization is still
-	// pending aborts rather than silently producing a cohort that excludes a live
-	// controller or waits on one that has disappeared.
+	// The participant set is frozen. A join/leave before E4 means this
+	// degradation episode could not migrate safely; abandon it and require a
+	// cooldown plus fresh QoS proof rather than carrying a stale target.
 	const uint8_t liveMask = rfChannelLiveMask(now);
 	if (liveMask != g_rfChGroupParticipants) {
+		const uint8_t failedTarget = g_rfChHandoffTarget;
 		rfChannelGroupAbort();
+		rfChannelRecoveryAbandonAutomaticAttempt(failedTarget, now);
 		return false;
 	}
-
-	bool sawActivity = false;
-	for (uint8_t s = 0; s < NSLOT; s++) {
-		const uint8_t bit = (uint8_t)(1u << s);
-		if (!(g_rfChGroupParticipants & bit))
-			continue;
-		if (g_rfHopInputSeq[s] != g_rfChGroupActivitySeqSeen[s]) {
-			g_rfChGroupActivitySeqSeen[s] = g_rfHopInputSeq[s];
-			g_rfChGroupReportSeqSeen[s] = g_rfHopInputReportSeq[s];
-			sawActivity = true;
-			g_rfChGroupSawActivitySincePending = true;
-		}
-	}
-	if (sawActivity) {
-		rfChannelGroupResetNeutralProof();
-		return false;
-	}
-
-	// Preserve the fail-closed activity-cycle prerequisite. In the
-	// group case, a meaningful post-request event from any participant opens the
-	// shared neutral-qualification phase; every participant must then prove fresh
-	// neutral input after the most recent activity reset.
-	if (g_rfChHandoffRequireActivityCycle &&
-	    !g_rfChGroupSawActivitySincePending)
-		return false;
-
 	for (uint8_t s = 0; s < NSLOT; s++) {
 		const uint8_t bit = (uint8_t)(1u << s);
 		if (!(g_rfChGroupParticipants & bit))
 			continue;
 		if (g_rfHopInputReportSeq[s] != g_rfChGroupReportSeqSeen[s]) {
 			g_rfChGroupReportSeqSeen[s] = g_rfHopInputReportSeq[s];
-			if (g_rfHopInputLastMask[s] != 0u) {
-				rfChannelGroupResetNeutralProof();
-				return false;
-			}
 			g_rfChGroupNeutralSeenMask |= bit;
 		}
 	}
-
-	if (g_rfChGroupNeutralSeenMask != g_rfChGroupParticipants)
+	if (g_rfChGroupNeutralSeenMask != g_rfChGroupParticipants) {
+		g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_FRESH_REPORT;
+		g_rfChHandoffNeutralMs = 0;
 		return false;
-
+	}
+	uint32_t cohortNeutralMs = 0xFFFFFFFFu;
 	for (uint8_t s = 0; s < NSLOT; s++) {
 		const uint8_t bit = (uint8_t)(1u << s);
 		if (!(g_rfChGroupParticipants & bit))
 			continue;
-		if (g_rfHopInputLastMask[s] != 0u ||
-		    (uint32_t)(now - g_rfHopInputLastReportMs[s]) >
-			    RF_CHANNEL_HANDOFF_INPUT_REPORT_FRESH_MS) {
-			rfChannelGroupResetNeutralProof();
+		if (g_rfHopInputLastMask[s] != 0u) {
+			g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_INPUT_ACTIVE;
+			g_rfChHandoffNeutralMs = 0;
 			return false;
 		}
+		if (!g_rfHopInputLastReportMs[s] ||
+		    (uint32_t)(now - g_rfHopInputLastReportMs[s]) >
+			    RF_CHANNEL_HANDOFF_INPUT_REPORT_FRESH_MS ||
+		    !g_rfHopInputNeutralSinceMs[s]) {
+			g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_FRESH_REPORT;
+			g_rfChHandoffNeutralMs = 0;
+			return false;
+		}
+		const uint32_t neutralMs =
+			(uint32_t)(now - g_rfHopInputNeutralSinceMs[s]);
+		if (neutralMs < cohortNeutralMs)
+			cohortNeutralMs = neutralMs;
 	}
-
-	if (!g_rfChGroupNeutralStartValid) {
-		g_rfChGroupNeutralStartValid = true;
-		g_rfChGroupNeutralStartMs = now;
+	if (cohortNeutralMs < RF_CHANNEL_HANDOFF_QUIESCENT_MS) {
+		g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_NEUTRAL_DWELL;
+		g_rfChHandoffNeutralMs = cohortNeutralMs > 0xFFFFu ?
+						 0xFFFFu :
+						 (uint16_t)cohortNeutralMs;
 		return false;
 	}
-	if ((uint32_t)(now - g_rfChGroupNeutralStartMs) <
-	    RF_CHANNEL_HANDOFF_QUIESCENT_MS)
-		return false;
+	g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_NONE;
+	g_rfChHandoffNeutralMs = RF_CHANNEL_HANDOFF_QUIESCENT_MS;
 	return true;
 }
 
@@ -3321,9 +3400,14 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 
 	if (g_rfChGroupPhase == RF_GROUP_TARGET_ACQUIRE) {
 		if (rfChannelFreshReply(g_rfChGroupParticipants, now)) {
+			const bool automatic = !g_rfChHandoffManualImmediate;
 			g_rfChHandoffState = RF_CH_IDLE;
 			g_lastChannelHopMs = now;
 			g_qosLastHopMs = now;
+			if (automatic) {
+				g_recoveryTargetChannel = 0;
+				rfChannelRecoverySyncResidence();
+			}
 			rfChannelGroupReset();
 			return;
 		}
@@ -3351,14 +3435,12 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 
 	if (g_rfChGroupPhase == RF_GROUP_PARTIAL_ACQUIRE_OLD) {
 		if (rfChannelFreshReply(g_rfChGroupParticipants, now)) {
-			if (g_rfChHandoffManualImmediate) {
-				rfChannelGroupAbort();
-				return;
-			}
-			// Everyone is confirmed back on the old session. Keep the same recovery
-			// request alive, but require a brand-new shared activity cycle
-			// before another group authorization attempt.
-			rfChannelGroupRearmPending();
+			const bool automatic = !g_rfChHandoffManualImmediate;
+			const uint8_t failedTarget = g_rfChHandoffTarget;
+			rfChannelGroupAbort();
+			if (automatic)
+				rfChannelRecoveryAbandonAutomaticAttempt(
+					failedTarget, now);
 			return;
 		}
 		if ((uint32_t)(now - g_rfChHandoffPhaseMs) <
@@ -3366,7 +3448,12 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 			return;
 		g_lastDisc = 0;
 		g_lastSessBeacon = 0;
+		const bool automatic = !g_rfChHandoffManualImmediate;
+		const uint8_t failedTarget = g_rfChHandoffTarget;
 		rfChannelGroupAbort();
+		if (automatic)
+			rfChannelRecoveryAbandonAutomaticAttempt(failedTarget,
+								 now);
 		return;
 	}
 
@@ -3389,8 +3476,13 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 
 	if (g_rfChGroupPhase == RF_GROUP_ROLLBACK_ACQUIRE_OLD) {
 		if (rfChannelFreshReply(g_rfChGroupParticipants, now)) {
+			const bool automatic = !g_rfChHandoffManualImmediate;
+			const uint8_t failedTarget = g_rfChHandoffTarget;
 			g_rfChHandoffState = RF_CH_IDLE;
 			rfChannelGroupReset();
+			if (automatic)
+				rfChannelRecoveryAbandonAutomaticAttempt(
+					failedTarget, now);
 			return;
 		}
 		if ((uint32_t)(now - g_rfChHandoffPhaseMs) <
@@ -3398,7 +3490,12 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 			return;
 		g_lastDisc = 0;
 		g_lastSessBeacon = 0;
+		const bool automatic = !g_rfChHandoffManualImmediate;
+		const uint8_t failedTarget = g_rfChHandoffTarget;
 		rfChannelGroupAbort();
+		if (automatic)
+			rfChannelRecoveryAbandonAutomaticAttempt(failedTarget,
+								 now);
 	}
 }
 
@@ -3455,6 +3552,9 @@ bool rfRecoveryRequestManualHop(uint8_t channel)
 	// target, discard prior-channel bad streaks, and grant the normal residency
 	// interval even if this manual attempt later rolls back to the old channel.
 	(void)rfChannelRecoverySetTarget(0u);
+	g_recoveryCooldownUntilMs = 0;
+	g_recoveryFailedTargetMask = 0;
+	g_recoveryLastFailedTarget = 0;
 	g_recoveryResidenceChannel = g_sessCh;
 	g_recoveryRequestedThisResidence = false;
 	g_channelRecoveryDecidedThisResidence = false;
@@ -3463,6 +3563,32 @@ bool rfRecoveryRequestManualHop(uint8_t channel)
 	g_qosLastHopMs = now;
 
 	return rfJournalBuilderImmediateHop(channel);
+}
+
+bool rfRecoveryRequestTestAutomaticHop(uint8_t channel)
+{
+	if (rfJournalBuilderActive() || rfIdleTimeoutTestBusy() ||
+	    rfChannelHistoryPoolIndex(channel) < 0 || channel == g_sessCh ||
+	    g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
+		return false;
+	const unsigned long now = millis();
+	if (!rfChannelLiveMask(now))
+		return false;
+	if (g_ambientSurveyRunning)
+		rfAmbientSurveyAbort();
+	g_ambientSurveyPending = false;
+	g_ambientSurveyManual = false;
+	g_recoveryCooldownUntilMs = 0;
+	g_recoveryFailedTargetMask &= ~rfRecoveryTargetBit(channel);
+	if (g_recoveryLastFailedTarget == channel)
+		g_recoveryLastFailedTarget = 0;
+	g_recoveryRequestedThisResidence = false;
+	g_channelRecoveryDecidedThisResidence = true;
+	if (!rfChannelRecoverySetTarget(channel))
+		return false;
+	rfChannelRecoveryRequest(true);
+	return g_rfChGroupActive && g_rfChHandoffTarget == channel &&
+	       !g_rfChHandoffManualImmediate;
 }
 
 // TX one connected packet [LEN][S1][payload] on channel ch, then RX the reply into rfrx; decodes 0xF1.

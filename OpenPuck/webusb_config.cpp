@@ -482,9 +482,10 @@ static bool webusbSendRfStatus()
 	rfRecoveryStatusSnapshot(&status);
 	// Append-only trailers after the counted channel rows preserve the v1
 	// header/row offsets: 4 bytes handoff telemetry + 7 bytes journal-builder
-	// status + 1 byte ambient-survey progress + 17 bytes idle-timeout test.
-	static uint8_t
-		f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 + 17];
+	// status + 1 byte ambient-survey progress + 17 bytes idle-timeout test +
+	// 5 bytes automatic-handoff admission/retry diagnostics.
+	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 +
+			 17 + 5];
 	uint8_t *q = f + 2;
 	f[0] = 0xAD;
 	f[1] = (uint8_t)(sizeof f - 2u);
@@ -538,6 +539,11 @@ static bool webusbSendRfStatus()
 	*q++ = status.idleTestParticipantMask;
 	*q++ = status.idleTestOfflineMask;
 	*q++ = status.idleTestFailure;
+	*q++ = status.handoffWaitReason;
+	*q++ = (uint8_t)status.handoffNeutralMs;
+	*q++ = (uint8_t)(status.handoffNeutralMs >> 8);
+	*q++ = status.recoveryCooldownSeconds;
+	*q++ = status.recoveryFailedTarget;
 	if (tud_vendor_write_available() < sizeof f)
 		return false;
 	usb_web.write(f, sizeof f);
@@ -1210,6 +1216,12 @@ void webusbPoll()
 							true);
 					else
 						rfRecoveryCancelIdleTimeoutTest();
+					g_rfStatusRequest = true;
+					persist = false;
+					break;
+				case 106:
+					(void)rfRecoveryRequestTestAutomaticHop(
+						v);
 					g_rfStatusRequest = true;
 					persist = false;
 					break;
