@@ -764,7 +764,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false, rfSurveyRunning=false;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false;
 let rfHopRequestedCh=0, rfHopSawHandoff=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
@@ -821,6 +821,8 @@ function applyRfStatus(p){
   $("#rfSurvey").disabled=rfBuilderActive;
   rfHandoffActive=handoff;
   rfSurveyRunning=running;
+  rfSurveyPending=pending;
+  rfSurveyGeneration=generation;
   if(rfHopPending&&handoff) rfHopSawHandoff=true;
   if(rfHopPending&&!rfHopRequestedCh&&!handoff) rfHopPending=false;
   $("#rfSurveyState").textContent=running?(surveyChannel?`surveying Ch ${surveyChannel}`:"surveying"):pending?(handoff?"queued for handoff":"surveying"):ambient?`cached #${generation}`:"not sampled";
@@ -990,19 +992,45 @@ async function manualJournalBuilderRf(){
   finally{ rfBusy=false; }
 }
 async function manualSurveyRf(){
-  if(!dev||isDongle||!rfCapable) return;
+  if(!dev||isDongle||!rfCapable||rfSurveyWatchActive) return;
   $("#rfSurveyState").textContent="surveying";
   $("#rfSurveyNote").textContent="Surveying.";
-  if(!(await waitRfUiIdle())) return;
+  rfSurveyWatchActive=true;
+  if(!(await waitRfUiIdle())){ rfSurveyWatchActive=false; return; }
   rfBusy=true;
+  const startGeneration=rfSurveyGeneration;
+  let sawSurvey=false, sawStatus=false, terminal=false;
   try{
     await waitIdle(); if(!dev) return;
     await send([0x02,98,1]);
-    const ack=await readBlob(); if(ack) applyBlob(ack);
-    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
-    rfLastRefresh=Date.now();
+    // The scanner advances every 100 ms. While this explicit survey owns the
+    // vendor endpoint, poll RF status faster than that so pending->running and
+    // each sampled channel can be painted instead of aliasing against the
+    // normal 600-ms panel poll. readFrame scans a whole USB transfer for 0xAD,
+    // so a coalesced generic 0xA5 ack cannot hide the RF status frame.
+    for(let i=0;i<300&&dev;i++){
+      const p=await readFrame(0xAD,13,256);
+      if(p){
+        sawStatus=true;
+        const flags=p[1], running=!!(flags&1), pending=!!(flags&2);
+        const generation=p[7]|(p[8]<<8);
+        applyRfStatus(p);
+        if(running||pending) sawSurvey=true;
+        if(!running&&!pending&&(sawSurvey||generation!==startGeneration)){
+          terminal=true;
+          break;
+        }
+      }
+      await new Promise(resolve=>setTimeout(resolve,50));
+      await send([0x02,97,1]);
+    }
+    if(!terminal){
+      if(rfSurveyRunning||rfSurveyPending) $("#rfSurveyNote").textContent="Survey still active; status updates will continue.";
+      else if(!sawStatus) $("#rfSurveyNote").textContent="Survey status unavailable; refresh RF status to verify completion.";
+    }
+    if(sawStatus) rfLastRefresh=Date.now();
   }catch(e){ log("RF survey err: "+e.message); }
-  finally{ rfBusy=false; }
+  finally{ rfBusy=false; rfSurveyWatchActive=false; }
 }
 async function refreshRfStatus(survey=false){
   if(!dev||isDongle||!rfCapable||rfBusy) return;
@@ -1220,7 +1248,7 @@ function applyBlob(p){
   const rssi=(p.length>37?p[37]:0);
   rfCapable=(p.length>179 && p[179]===0x52);
   const rfCard=$("#rfRecoveryCard"); if(rfCard) rfCard.classList.toggle("hide", !rfCapable);
-  if(rfCapable&&Date.now()-rfLastRefresh>(rfHandoffActive||rfHopPending||rfSurveyRunning?100:rfBuilderActive?500:2000)) refreshRfStatus(false);
+  if(rfCapable&&Date.now()-rfLastRefresh>(rfHandoffActive||rfHopPending||rfSurveyRunning||rfSurveyPending?100:rfBuilderActive?500:2000)) refreshRfStatus(false);
 
 
   // per-slot link status (protocol v8, p.length >= 73)
