@@ -1405,6 +1405,38 @@ static void rfChannelJournalStep(uint32_t now, uint8_t liveMask)
 		rfChannelJournalFinishWrite(now);
 }
 
+// Journal Builder owns the RF workflow after all measurements and the final hop
+// have completed. Drain its pre-erased append record in one bounded gap instead
+// of using the passive writer's live rate-shaping. That passive path deliberately
+// latches off after a slow live word; applying that latch here could strand the
+// user-invoked Builder in Saving forever. No page erase is performed here.
+static void rfChannelJournalDrainBuilderWrite(uint32_t now)
+{
+	if (!g_channelJournalJobActive || g_rfChHandoffState != RF_CH_IDLE ||
+	    g_rfChGroupActive)
+		return;
+	const uint8_t words = sizeof(RfChannelJournalRecord) / 4u;
+	while (g_channelJournalJobActive && g_channelJournalJobWord < words) {
+		const uint8_t word = g_channelJournalJobWord;
+		const uint32_t value =
+			((const uint32_t *)&g_channelJournalJob)[word];
+		const uintptr_t address =
+			rfChannelJournalSlotAddress(
+				(uint16_t)g_channelJournalJobSlot) +
+			(uintptr_t)word * 4u;
+		if (!rfChannelJournalProgramWord(address, value, nullptr,
+						 nullptr)) {
+			g_channelJournalJobActive = false;
+			g_channelJournalFreeSlot =
+				rfChannelJournalFindFreeSlot();
+			return;
+		}
+		g_channelJournalJobWord++;
+	}
+	if (g_channelJournalJobActive && g_channelJournalJobWord >= words)
+		rfChannelJournalFinishWrite(now);
+}
+
 static bool rfChannelJournalMaybeCollect(uint32_t now, uint8_t liveMask)
 {
 	if (g_channelJournalFreeSlot >= 0)
@@ -1713,7 +1745,6 @@ static bool rfJournalBuilderPromoteAndStartWrite(unsigned long now)
 	g_channelHistoryResidenceOutcomeRecorded = false;
 	if (!rfChannelJournalStartWrite())
 		return false;
-	rfChannelJournalStep(now, rfChannelLiveMask(now));
 	return true;
 }
 
@@ -1984,7 +2015,7 @@ static void rfJournalBuilderTask()
 						 now);
 			return;
 		}
-		rfChannelJournalStep(now, liveMask);
+		rfChannelJournalDrainBuilderWrite(now);
 		if (g_rfJournalBuilderPromoted && !g_channelJournalJobActive &&
 		    g_channelHistoryPersistentDirty) {
 			g_rfJournalBuilderFailure =

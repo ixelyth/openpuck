@@ -58,9 +58,10 @@ extern uint8_t g_rumbleStyle; // RUMBLE_STYLE_*
 void hapticTestRumble();
 
 // Journal-builder keep-awake tick. It is deliberately short and is emitted only
-// between measured channels, never inside a quality window.
-#define RF_JOURNAL_BUILDER_TICK_AMP 0x3000u
-#define RF_JOURNAL_BUILDER_TICK_MS 80u
+// between measured channels, never inside a quality window. The direct 0x82
+// command mirrors the unattended stability-test keepalive rather than ordinary
+// host rumble, which does not reliably reset the controller inactivity timer.
+#define RF_JOURNAL_BUILDER_TICK_MS 150u
 void hapticRfJournalBuilderTick(uint8_t participantMask);
 
 // ---- relay queue (written by puck_hid.cpp, mode_*.cpp, serial_console.cpp; drained by rf_link.cpp) ----

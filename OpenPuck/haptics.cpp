@@ -681,14 +681,17 @@ static unsigned long g_rumbleTestStop = 0;
 static unsigned long g_rfJournalBuilderTickStop = 0;
 static uint8_t g_rfJournalBuilderTickMask = 0;
 
+static const uint8_t RF_JOURNAL_BUILDER_TICK_ON[3] = { 0x01, 0x01, 0xF7 };
+static const uint8_t RF_JOURNAL_BUILDER_TICK_OFF[3] = { 0x01, 0x01, 0x00 };
+
 void hapticRfJournalBuilderTick(uint8_t participantMask)
 {
 	g_rfJournalBuilderTickMask = 0;
 	for (uint8_t s = 0; s < NSLOT; s++) {
 		const uint8_t bit = (uint8_t)(1u << s);
 		if ((participantMask & bit) && hapticLinkUp((int)s) &&
-		    hapticSteamRumble(RF_JOURNAL_BUILDER_TICK_AMP,
-				      RF_JOURNAL_BUILDER_TICK_AMP, s))
+		    relayEnqueue(0x82, RF_JOURNAL_BUILDER_TICK_ON,
+				 sizeof RF_JOURNAL_BUILDER_TICK_ON, true, s))
 			g_rfJournalBuilderTickMask |= bit;
 	}
 	if (!g_rfJournalBuilderTickMask) {
@@ -721,15 +724,11 @@ void hapticTask()
 		g_rfJournalBuilderTickMask = 0;
 		for (uint8_t s = 0; s < NSLOT; s++)
 			if (mask & (uint8_t)(1u << s))
-				hapticSteamRumble(0, 0, s);
+				relayEnqueue(0x82, RF_JOURNAL_BUILDER_TICK_OFF,
+					     sizeof RF_JOURNAL_BUILDER_TICK_OFF,
+					     true, s);
 	}
 
-	// stop the test buzz -- signed compare so the millis() rollover cannot strand a latched actuator
-	if (g_rumbleTestStop && (long)(millis() - g_rumbleTestStop) >= 0) {
-		g_rumbleTestStop = 0;
-		for (uint8_t s = 0; s < NSLOT; s++)
-			hapticSteamRumble(0, 0, s);
-	}
 	// id9 steering (SET_SETTINGS index 9 = digital-mappings / the controller's AUTONOMOUS mapping+haptic
 	// engine, which is what generates the trackpad tick haptics). We decide per mode whether that autonomous
 	// engine should be ON, then either land id9=1 ONCE per connect episode (engine on) or hold id9=0 every
