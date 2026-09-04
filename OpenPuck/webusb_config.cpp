@@ -985,10 +985,11 @@ void webusbPoll()
 
 				// every settable field persists (poll rate is no longer settable)
 				bool persist = true;
-				// RF controls (97..104) use the dedicated 0xAD reply only. Scheduling
+				// RF controls (97..104, 106) use the dedicated 0xAD reply only. Scheduling
 				// the generic 0xA5 blob as well lets the SOF drain expose either frame
 				// first and phase-shifts the browser's shared bulk-IN stream.
-				const bool rfStatusOnly = f >= 97u && f <= 104u;
+				const bool rfStatusOnly =
+					(f >= 97u && f <= 104u) || f == 106u;
 				// per-type cfg writes (protocol v10/v17): field = 40 + et*9 + k, k: 0..3 back, 4 qam, 5 abSwap,
 				// 6 padHaptics, 7 ledBright, 8 rumble. Edits g_type[et]; refresh the live mirrors if it's the active type.
 				if (f >= 40 && f < 40 + ET_COUNT * 9) {

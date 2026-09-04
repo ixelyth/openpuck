@@ -790,6 +790,14 @@ function applyRfStatus(p){
   const hopPhase=p.length>=tail+4?p[tail]:0;
   const hopElapsed=p.length>=tail+4?(p[tail+1]|(p[tail+2]<<8)):0;
   const hopOld=p.length>=tail+4?p[tail+3]:0;
+  // The automatic-handoff trailer is append-only after the 17-byte idle-test trailer:
+  // tail + 4 handoff + 7 Builder + 1 survey + 17 idle = tail + 29. Parse it
+  // before rendering handoff state; JavaScript const bindings cannot be read before declaration.
+  const autoBase=tail+29;
+  const waitReason=p.length>=autoBase+5?p[autoBase]:0;
+  const neutralMs=p.length>=autoBase+5?(p[autoBase+1]|(p[autoBase+2]<<8)):0;
+  const recoveryCooldown=p.length>=autoBase+5?p[autoBase+3]:0;
+  const recoveryFailedTarget=p.length>=autoBase+5?p[autoBase+4]:0;
   const hopPhaseText=["Idle","Waiting for neutral","Authorizing","Switching","Acquiring","Reconciling","Rolling back","Reacquiring"];
   let hopText=hopPhaseText[hopPhase]||("Phase "+hopPhase);
   if(hopPhase===1){
@@ -822,11 +830,6 @@ function applyRfStatus(p){
   const idleMask=p.length>=idleBase+17?p[idleBase+14]:0;
   const idleOfflineMask=p.length>=idleBase+17?p[idleBase+15]:0;
   const idleFailure=p.length>=idleBase+17?p[idleBase+16]:0;
-  const autoBase=idleBase+17;
-  const waitReason=p.length>=autoBase+5?p[autoBase]:0;
-  const neutralMs=p.length>=autoBase+5?(p[autoBase+1]|(p[autoBase+2]<<8)):0;
-  const recoveryCooldown=p.length>=autoBase+5?p[autoBase+3]:0;
-  const recoveryFailedTarget=p.length>=autoBase+5?p[autoBase+4]:0;
   const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write could not be completed","could not read controller idle timeout","startup save failed"];
   let builderText="Idle";
   if(builderPhase===1) builderText="Preparing controllers / ambient survey";
