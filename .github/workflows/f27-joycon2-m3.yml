@@ -1,0 +1,117 @@
+name: F27-M3 Joy-Con 2 stationary mouse carrier
+
+on:
+  push:
+    branches:
+      - f27-joycon2-m3
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M3
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compose Makerdiary build support
+        run: |
+          set -eu
+          git fetch origin makerdiary-mdk
+          git cherry-pick --no-commit aa4a619e52be052d683ea6db1a3dd2ee96f19420
+
+      - name: Apply isolated F27 hooks
+        run: python3 tools/f27_joycon2_poc.py
+
+      - name: Apply M1 mouse-negotiation hooks
+        run: python3 tools/f27_joycon2_m1.py
+
+      - name: Apply M2 forced-mouse hook
+        run: python3 tools/f27_joycon2_m2.py
+
+      - name: Apply M3 stationary-carrier hook
+        run: python3 tools/f27_joycon2_m3.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify experiment source
+        run: |
+          make format
+          make check
+          git diff --check
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Keep both packages intentionally unpinned, matching makerdiary-mdk.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Generate F27-M3 version header
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M3-JCR-${short}" ./gen_version.sh
+
+      - name: Build standard F27-M3 R target
+        run: |
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M3-JoyCon2-R-standard.uf2
+
+      - name: Build Makerdiary MDK F27-M3 R target
+        run: |
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M3-JoyCon2-R-MDK.uf2
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M3-JoyCon2-R.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          base_f27=7eed27fda7813289cab3a0da3468bf362d6c29a3
+          base_m1=2816b04f4a721f2ee0e8f4526d5fa8abc5335710
+          base_m2=6fdda64fea86451a3170c85a638faad6744669f6
+          makerdiary=aa4a619e52be052d683ea6db1a3dd2ee96f19420
+          target=JoyCon2-R-M3
+          define=2
+          experiment=emit stationary 30-byte mouse motion carrier whenever optical-mouse surface is active, independent of IMU feature bit 0x04
+          unchanged=M2 forced mouse gate; M1 negotiation/status/offset0x08=0x38; R identity/report08/delta/surface0x17-0xFF/250Hz cadence
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-M3-JoyCon2-R-MDK.uf2 >> build/F27-M3-JoyCon2-R.manifest.txt
+
+      - name: Upload F27-M3 R target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M3-JoyCon2-R
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M3-JoyCon2-R-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M3-JoyCon2-R-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M3-JoyCon2-R.manifest.txt
