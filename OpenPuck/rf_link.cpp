@@ -162,6 +162,7 @@ static bool g_ambientSurveyPending = false;
 static bool g_ambientSurveyManual = false;
 static uint8_t g_ambientSurveyIndex = 0;
 static uint8_t g_ambientSurveyPass = 0;
+static uint8_t g_ambientSurveyChannel = 0;
 static uint16_t g_ambientSurveyGeneration = 0;
 static unsigned long g_ambientSurveyIdleSinceMs = 0;
 static unsigned long g_ambientSurveyLastStepMs = 0;
@@ -798,6 +799,7 @@ static void rfAmbientSurveyAbort()
 	g_ambientSurveyRunning = false;
 	g_ambientSurveyIndex = 0;
 	g_ambientSurveyPass = 0;
+	g_ambientSurveyChannel = 0;
 	memset(g_ambientWorkRssi, 0, sizeof g_ambientWorkRssi);
 	memset(g_ambientWorkSamples, 0, sizeof g_ambientWorkSamples);
 }
@@ -808,6 +810,7 @@ static void rfAmbientSurveyBegin(unsigned long now)
 	memset(g_ambientWorkSamples, 0, sizeof g_ambientWorkSamples);
 	g_ambientSurveyIndex = 0;
 	g_ambientSurveyPass = 0;
+	g_ambientSurveyChannel = g_recoveryChannelPool[0];
 	g_ambientSurveyLastStepMs = now - RF_AMBIENT_SURVEY_STEP_MS;
 	g_ambientSurveyRunning = true;
 	g_ambientSurveyPending = false;
@@ -866,8 +869,9 @@ static void rfAmbientSurveyTask()
 	g_ambientSurveyLastStepMs = now;
 
 	const uint8_t i = g_ambientSurveyIndex;
+	g_ambientSurveyChannel = g_recoveryChannelPool[i];
 	const uint8_t sample = rfAmbientMeasureChannel(
-		g_recoveryChannelPool[i], RF_AMBIENT_SURVEY_SAMPLE_US);
+		g_ambientSurveyChannel, RF_AMBIENT_SURVEY_SAMPLE_US);
 	if (sample) {
 		if (!g_ambientWorkRssi[i] || sample < g_ambientWorkRssi[i])
 			g_ambientWorkRssi[i] = sample;
@@ -1043,6 +1047,8 @@ void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 	status->channelCount = RF_CHANNEL_HISTORY_POOL_COUNT;
 	status->journalWrites = g_channelHistoryPersistentWrites;
 	status->ambientGeneration = g_ambientSurveyGeneration;
+	status->ambientSurveyChannel =
+		g_ambientSurveyRunning ? g_ambientSurveyChannel : 0u;
 	status->journalSequence = g_channelJournalSequence;
 	status->handoffPhase = rfRecoveryHandoffPhase();
 	status->handoffOldChannel = g_rfChHandoffOld;

@@ -764,7 +764,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfBuilderActive=false, rfBuilderSaving=false, rfSurveyRunning=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
 function rfChLabel(ch){ return ch ? `Ch ${ch} · ${2400+ch} MHz` : "—"; }
@@ -797,6 +797,7 @@ function applyRfStatus(p){
   const builderMask=p.length>=builderBase+7?p[builderBase+4]:0;
   const builderBest=p.length>=builderBase+7?p[builderBase+5]:0;
   const builderFailure=p.length>=builderBase+7?p[builderBase+6]:0;
+  const surveyChannel=p.length>=builderBase+8?p[builderBase+7]:0;
   const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed"];
   let builderText="Idle";
   if(builderPhase===1) builderText="Ambient survey";
@@ -818,9 +819,10 @@ function applyRfStatus(p){
   $("#rfBuilder").disabled=rfBuilderSaving;
   $("#rfSurvey").disabled=rfBuilderActive;
   rfHandoffActive=handoff;
+  rfSurveyRunning=running;
   if(rfHopPending&&!handoff) rfHopPending=false;
-  $("#rfSurveyState").textContent=running?"running":pending?(handoff?"queued for handoff":"requested"):ambient?`cached #${generation}`:"not sampled";
-  $("#rfSurveyNote").textContent=handoff&&pending?"Survey queued until the current RF hop or rollback completes.":pending?"Survey requested.":running&&live?"Sampling now.":running?"Sampling the progressive channel pool.":"Click Survey to sample now.";
+  $("#rfSurveyState").textContent=running?(surveyChannel?`surveying Ch ${surveyChannel}`:"surveying"):pending?(handoff?"queued for handoff":"surveying"):ambient?`cached #${generation}`:"not sampled";
+  $("#rfSurveyNote").textContent=handoff&&pending?"Survey queued until the current RF hop or rollback completes.":running&&surveyChannel?`Surveying Ch ${surveyChannel}.`:running?"Surveying.":pending?"Surveying.":"Click Survey to sample now.";
   const body=$("#rfJournalBody"), bars=$("#rfAmbientBars"); body.innerHTML=""; bars.innerHTML=""; rfPoolChannels=new Set();
   for(let i=0;i<count;i++){
     const q=13+i*9; if(q+9>p.length) break;
@@ -945,8 +947,8 @@ async function manualJournalBuilderRf(){
 }
 async function manualSurveyRf(){
   if(!dev||isDongle||!rfCapable) return;
-  $("#rfSurveyState").textContent="requesting";
-  $("#rfSurveyNote").textContent="Survey requested.";
+  $("#rfSurveyState").textContent="surveying";
+  $("#rfSurveyNote").textContent="Surveying.";
   if(!(await waitRfUiIdle())) return;
   rfBusy=true;
   try{
@@ -1174,7 +1176,7 @@ function applyBlob(p){
   const rssi=(p.length>37?p[37]:0);
   rfCapable=(p.length>179 && p[179]===0x52);
   const rfCard=$("#rfRecoveryCard"); if(rfCard) rfCard.classList.toggle("hide", !rfCapable);
-  if(rfCapable&&Date.now()-rfLastRefresh>(rfHandoffActive||rfHopPending?100:rfBuilderActive?500:2000)) refreshRfStatus(false);
+  if(rfCapable&&Date.now()-rfLastRefresh>(rfHandoffActive||rfHopPending||rfSurveyRunning?100:rfBuilderActive?500:2000)) refreshRfStatus(false);
 
 
   // per-slot link status (protocol v8, p.length >= 73)

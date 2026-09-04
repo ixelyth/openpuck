@@ -481,8 +481,9 @@ static bool webusbSendRfStatus()
 	static RfRecoveryStatus status;
 	rfRecoveryStatusSnapshot(&status);
 	// Append-only trailers after the counted channel rows preserve the v1
-	// header/row offsets: 4 bytes handoff telemetry + 7 bytes journal-builder status.
-	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7];
+	// header/row offsets: 4 bytes handoff telemetry + 7 bytes journal-builder
+	// status + 1 byte ambient-survey progress.
+	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1];
 	uint8_t *q = f + 2;
 	f[0] = 0xAD;
 	f[1] = (uint8_t)(sizeof f - 2u);
@@ -522,6 +523,7 @@ static bool webusbSendRfStatus()
 	*q++ = status.journalBuilderParticipantMask;
 	*q++ = status.journalBuilderBestChannel;
 	*q++ = status.journalBuilderFailure;
+	*q++ = status.ambientSurveyChannel;
 	if (tud_vendor_write_available() < sizeof f)
 		return false;
 	usb_web.write(f, sizeof f);

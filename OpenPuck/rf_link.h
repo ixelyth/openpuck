@@ -172,6 +172,7 @@ struct RfRecoveryStatus {
 	uint8_t channelCount;
 	uint8_t journalWrites;
 	uint16_t ambientGeneration;
+	uint8_t ambientSurveyChannel;
 	uint32_t journalSequence;
 	RfChannelStatusEntry channel[RF_RECOVERY_STATUS_CHANNELS];
 	uint8_t handoffPhase;
