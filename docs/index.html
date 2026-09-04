@@ -866,6 +866,11 @@ function setRfHopButtonsDisabled(disabled){
     const btn=tr.querySelector("button[data-rf-hop]"); if(!btn) continue;
     btn.disabled=rfHopPending||rfHandoffActive||rfBuilderActive||btn.textContent==="Active";
   }
+  // Keep the Builder interlock synchronized with the local Hop latch as well
+  // as firmware handoff state. The terminal status frame arrives before the
+  // manual-Hop finally block releases rfHopPending, so applyRfStatus() may have
+  // left this DOM button disabled using the old latch value.
+  $("#rfBuilder").disabled=rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&(rfHandoffActive||rfHopPending));
 }
 function showRfHopTarget(ch){
   $("#rfTargetCh").textContent=rfChLabel(ch);
