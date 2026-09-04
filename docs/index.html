@@ -817,9 +817,9 @@ function applyRfStatus(p){
   const idleMask=p.length>=idleBase+17?p[idleBase+14]:0;
   const idleOfflineMask=p.length>=idleBase+17?p[idleBase+15]:0;
   const idleFailure=p.length>=idleBase+17?p[idleBase+16]:0;
-  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write could not be completed"];
+  const builderFailureText=["","no live controller","RF workflow busy","journal storage full","no valid channel","final hop failed","journal save failed","journal write could not be completed","could not read controller idle timeout"];
   let builderText="Idle";
-  if(builderPhase===1) builderText="Ambient survey";
+  if(builderPhase===1) builderText="Preparing controllers / ambient survey";
   else if(builderPhase===2) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · hopping to Ch ${builderChannel}`;
   else if(builderPhase===3) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · settling Ch ${builderChannel}`;
   else if(builderPhase===4) builderText=`Testing ${Math.min(builderIndex+1,count)}/${count} · Ch ${builderChannel} · ${builderProgress}/60 s`;

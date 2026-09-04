@@ -185,6 +185,7 @@ enum RfJournalBuilderFailure : uint8_t {
 	RF_JOURNAL_BUILDER_FAIL_FINAL_HOP = 5,
 	RF_JOURNAL_BUILDER_FAIL_SAVE = 6,
 	RF_JOURNAL_BUILDER_FAIL_JOURNAL_WRITE_BUSY = 7,
+	RF_JOURNAL_BUILDER_FAIL_IDLE_TIMEOUT_QUERY = 8,
 };
 
 static uint8_t g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_IDLE;
@@ -208,6 +209,21 @@ static uint32_t
 static uint8_t
 	g_rfJournalBuilderValidWindows[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
 static uint8_t g_rfJournalBuilderBadWindows[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
+
+// Builder keep-awake is crash-tolerant: read each frozen participant's live
+// inactivity timeout, then pulse that controller by one second and immediately
+// restore the exact captured value. Hardware proved that a same-value write does
+// not reset inactivity, while this +1 -> original transition does. No long-lived
+// timeout override exists for Complete/Cancel/Failure to clean up.
+#define RF_JOURNAL_BUILDER_IDLE_QUERY_RETRY_MS 500u
+#define RF_JOURNAL_BUILDER_IDLE_QUERY_TIMEOUT_MS 5000u
+#define RF_JOURNAL_BUILDER_IDLE_PULSE_INTERVAL_MS 60000u
+static uint8_t g_rfJournalBuilderIdleValueValidMask = 0;
+static uint16_t g_rfJournalBuilderIdleValueSeconds[NSLOT] = {};
+static unsigned long g_rfJournalBuilderIdleQueryStartedMs = 0;
+static unsigned long g_rfJournalBuilderIdleLastQueryMs[NSLOT] = {};
+static unsigned long g_rfJournalBuilderIdleLastPulseMs = 0;
+static bool g_rfJournalBuilderSurveyStarted = false;
 
 #define RF_IDLE_TEST_SETTING 50u
 #define RF_IDLE_TEST_DURATION_MS 600000u
@@ -1981,6 +1997,14 @@ static void rfJournalBuilderResetAll()
 	g_rfJournalBuilderHopAttempts = 0;
 	g_rfJournalBuilderPromoted = false;
 	g_rfJournalBuilderCancelRequested = false;
+	g_rfJournalBuilderIdleValueValidMask = 0;
+	memset(g_rfJournalBuilderIdleValueSeconds, 0,
+	       sizeof g_rfJournalBuilderIdleValueSeconds);
+	g_rfJournalBuilderIdleQueryStartedMs = 0;
+	memset(g_rfJournalBuilderIdleLastQueryMs, 0,
+	       sizeof g_rfJournalBuilderIdleLastQueryMs);
+	g_rfJournalBuilderIdleLastPulseMs = 0;
+	g_rfJournalBuilderSurveyStarted = false;
 }
 
 static void rfJournalBuilderSetPhase(uint8_t phase, unsigned long now)
@@ -2126,6 +2150,102 @@ static bool rfJournalBuilderImmediateHop(uint8_t channel)
 	return rfChannelGroupBegin(g_sessCh, channel, mask, now, true);
 }
 
+static bool rfJournalBuilderIdleQueryComplete()
+{
+	return (g_rfJournalBuilderIdleValueValidMask &
+		g_rfJournalBuilderParticipants) ==
+	       g_rfJournalBuilderParticipants;
+}
+
+static bool rfJournalBuilderIdleQueueRead(uint8_t slot)
+{
+	const uint8_t setting = RF_IDLE_TEST_SETTING;
+	return relayEnqueue(IBEX_CMD_GET_SETTINGS_VALUES, &setting, 1u, false,
+			    slot, true);
+}
+
+static bool rfJournalBuilderIdleQueueWrite(uint8_t slot, uint16_t value)
+{
+	const uint8_t payload[3] = {
+		RF_IDLE_TEST_SETTING,
+		(uint8_t)value,
+		(uint8_t)(value >> 8),
+	};
+	return relayEnqueue(IBEX_CMD_SET_SETTINGS_VALUES, payload,
+			    sizeof payload, false, slot);
+}
+
+static void rfJournalBuilderIdlePulse(uint8_t mask, unsigned long now)
+{
+	for (uint8_t slot = 0; slot < NSLOT; slot++) {
+		const uint8_t bit = (uint8_t)(1u << slot);
+		if (!(mask & bit) ||
+		    !(g_rfJournalBuilderIdleValueValidMask & bit))
+			continue;
+		const uint16_t original =
+			g_rfJournalBuilderIdleValueSeconds[slot];
+		// Zero disables inactivity sleep, so that controller needs no pulse.
+		if (!original)
+			continue;
+		// Match the hardware-validated +1-second diagnostic exactly. Use its
+		// conservative decrement fallback for unusually large timeout values.
+		const uint16_t pulse = original < 32767u ?
+					       (uint16_t)(original + 1u) :
+					       (uint16_t)(original - 1u);
+		for (uint8_t i = 0; i < RF_IDLE_TEST_WRITE_REPS; i++)
+			(void)rfJournalBuilderIdleQueueWrite(slot, pulse);
+		for (uint8_t i = 0; i < RF_IDLE_TEST_WRITE_REPS; i++)
+			(void)rfJournalBuilderIdleQueueWrite(slot, original);
+	}
+	g_rfJournalBuilderIdleLastPulseMs = now ? now : 1u;
+}
+
+static void rfJournalBuilderIdleCapture(uint8_t slot, const uint8_t *response,
+					uint8_t responseLen)
+{
+	if (!rfJournalBuilderActive() || slot >= NSLOT || responseLen < 5u ||
+	    !(g_rfJournalBuilderParticipants & (uint8_t)(1u << slot)) ||
+	    !g_rfJournalBuilderIdleLastQueryMs[slot] ||
+	    response[0] != IBEX_CMD_GET_SETTINGS_VALUES || response[1] < 3u ||
+	    response[2] != RF_IDLE_TEST_SETTING)
+		return;
+	const uint8_t bit = (uint8_t)(1u << slot);
+	if (g_rfJournalBuilderIdleValueValidMask & bit)
+		return;
+	g_rfJournalBuilderIdleValueSeconds[slot] = (uint16_t)response[3] |
+						   ((uint16_t)response[4] << 8);
+	g_rfJournalBuilderIdleValueValidMask |= bit;
+}
+
+static bool rfJournalBuilderIdlePrepare(unsigned long now)
+{
+	if (rfJournalBuilderIdleQueryComplete())
+		return true;
+	if (!g_rfJournalBuilderIdleQueryStartedMs)
+		g_rfJournalBuilderIdleQueryStartedMs = now ? now : 1u;
+	if ((uint32_t)(now - g_rfJournalBuilderIdleQueryStartedMs) >=
+	    RF_JOURNAL_BUILDER_IDLE_QUERY_TIMEOUT_MS) {
+		g_rfJournalBuilderFailure =
+			RF_JOURNAL_BUILDER_FAIL_IDLE_TIMEOUT_QUERY;
+		rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_FAILED, now);
+		return false;
+	}
+	for (uint8_t slot = 0; slot < NSLOT; slot++) {
+		const uint8_t bit = (uint8_t)(1u << slot);
+		if (!(g_rfJournalBuilderParticipants & bit) ||
+		    (g_rfJournalBuilderIdleValueValidMask & bit))
+			continue;
+		if (!g_rfJournalBuilderIdleLastQueryMs[slot] ||
+		    (uint32_t)(now - g_rfJournalBuilderIdleLastQueryMs[slot]) >=
+			    RF_JOURNAL_BUILDER_IDLE_QUERY_RETRY_MS) {
+			if (rfJournalBuilderIdleQueueRead(slot))
+				g_rfJournalBuilderIdleLastQueryMs[slot] =
+					now ? now : 1u;
+		}
+	}
+	return false;
+}
+
 bool rfRecoveryRequestJournalBuilder()
 {
 	const unsigned long now = millis();
@@ -2185,8 +2305,10 @@ bool rfRecoveryRequestJournalBuilder()
 	g_rfJournalBuilderOriginChannel = g_sessCh;
 	g_rfJournalBuilderSurveyGeneration = g_ambientSurveyGeneration;
 	g_rfJournalBuilderCohortStableMs = now;
+	g_rfJournalBuilderIdleQueryStartedMs = now ? now : 1u;
 	rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_SURVEY, now);
-	rfJournalBuilderRequestAmbientSurvey();
+	// Capture every participant's own setting 50 before the survey starts.
+	// The first +1 -> original pulse then refreshes inactivity immediately.
 	(void)rfChannelRecoverySetTarget(0u);
 	rfJournalBuilderResetQualityWindows();
 	return true;
@@ -2249,6 +2371,14 @@ static void rfJournalBuilderTask()
 			g_rfJournalBuilderCohortStableMs = 0;
 			rfJournalBuilderResetQualityWindows();
 		}
+		if (g_rfJournalBuilderIdleValueValidMask &&
+		    (!g_rfJournalBuilderIdleLastPulseMs ||
+		     (uint32_t)(now - g_rfJournalBuilderIdleLastPulseMs) >=
+			     RF_JOURNAL_BUILDER_IDLE_PULSE_INTERVAL_MS))
+			rfJournalBuilderIdlePulse(
+				(uint8_t)(liveMask &
+					  g_rfJournalBuilderParticipants),
+				now);
 		return;
 	}
 	if (g_rfJournalBuilderPhase == RF_JOURNAL_BUILDER_PAUSED) {
@@ -2257,6 +2387,13 @@ static void rfJournalBuilderTask()
 		if ((uint32_t)(now - g_rfJournalBuilderCohortStableMs) <
 		    RF_JOURNAL_BUILDER_RECONNECT_STABLE_MS)
 			return;
+		if (g_rfJournalBuilderResumePhase ==
+			    RF_JOURNAL_BUILDER_SURVEY &&
+		    !rfJournalBuilderIdleQueryComplete())
+			g_rfJournalBuilderIdleQueryStartedMs = now ? now : 1u;
+		if (g_rfJournalBuilderIdleValueValidMask)
+			rfJournalBuilderIdlePulse(
+				g_rfJournalBuilderParticipants, now);
 		rfJournalBuilderSetPhase(g_rfJournalBuilderResumePhase, now);
 		g_rfJournalBuilderHopAttempts = 0;
 		rfJournalBuilderResetQualityWindows();
@@ -2265,6 +2402,19 @@ static void rfJournalBuilderTask()
 
 	switch (g_rfJournalBuilderPhase) {
 	case RF_JOURNAL_BUILDER_SURVEY:
+		if (!rfJournalBuilderIdleQueryComplete()) {
+			(void)rfJournalBuilderIdlePrepare(now);
+			return;
+		}
+		if (!g_rfJournalBuilderSurveyStarted) {
+			rfJournalBuilderIdlePulse(
+				g_rfJournalBuilderParticipants, now);
+			g_rfJournalBuilderSurveyGeneration =
+				g_ambientSurveyGeneration;
+			g_rfJournalBuilderSurveyStarted = true;
+			rfJournalBuilderRequestAmbientSurvey();
+			return;
+		}
 		if (g_ambientSurveyGeneration !=
 			    g_rfJournalBuilderSurveyGeneration &&
 		    !g_ambientSurveyRunning && !g_ambientSurveyPending &&
@@ -2302,6 +2452,8 @@ static void rfJournalBuilderTask()
 		if (g_rfJournalBuilderHopAttempts >=
 		    RF_JOURNAL_BUILDER_HOP_ATTEMPTS) {
 			rfJournalBuilderMarkHopFailure(g_rfJournalBuilderIndex);
+			rfJournalBuilderIdlePulse(
+				g_rfJournalBuilderParticipants, now);
 			hapticRfJournalBuilderTick(
 				g_rfJournalBuilderParticipants);
 			rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_BETWEEN,
@@ -2325,6 +2477,7 @@ static void rfJournalBuilderTask()
 		if (g_rfJournalBuilderValidWindows[g_rfJournalBuilderIndex] <
 		    RF_JOURNAL_BUILDER_WINDOWS)
 			return;
+		rfJournalBuilderIdlePulse(g_rfJournalBuilderParticipants, now);
 		hapticRfJournalBuilderTick(g_rfJournalBuilderParticipants);
 		rfJournalBuilderSetPhase(RF_JOURNAL_BUILDER_BETWEEN, now);
 		return;
@@ -3765,11 +3918,16 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 							&rfrx[idx + 2];
 						if (ttype == 4 &&
 						    g_curSlot >= 0 &&
-						    g_curSlot < NSLOT)
+						    g_curSlot < NSLOT) {
+							rfJournalBuilderIdleCapture(
+								(uint8_t)
+									g_curSlot,
+								rec, tlen);
 							rfIdleTimeoutTestCapture(
 								(uint8_t)
 									g_curSlot,
 								rec, tlen);
+						}
 						if (ttype == 4 && tlen >= 2 &&
 						    rec[0] != 0 &&
 						    (uint16_t)(2 + rec[1]) <=
