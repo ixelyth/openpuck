@@ -136,6 +136,17 @@ struct RfChannelStatusEntry {
 	uint8_t recentOrder;
 };
 
+enum RfRecoveryHandoffPhase : uint8_t {
+	RF_RECOVERY_HANDOFF_IDLE = 0,
+	RF_RECOVERY_HANDOFF_WAIT_NEUTRAL = 1,
+	RF_RECOVERY_HANDOFF_AUTHORIZE = 2,
+	RF_RECOVERY_HANDOFF_SWITCH = 3,
+	RF_RECOVERY_HANDOFF_ACQUIRE_TARGET = 4,
+	RF_RECOVERY_HANDOFF_RECONCILE = 5,
+	RF_RECOVERY_HANDOFF_ROLLBACK_SWITCH = 6,
+	RF_RECOVERY_HANDOFF_ACQUIRE_OLD = 7,
+};
+
 struct RfRecoveryStatus {
 	uint8_t version;
 	uint8_t flags;
@@ -147,6 +158,9 @@ struct RfRecoveryStatus {
 	uint16_t ambientGeneration;
 	uint32_t journalSequence;
 	RfChannelStatusEntry channel[RF_RECOVERY_STATUS_CHANNELS];
+	uint8_t handoffPhase;
+	uint16_t handoffElapsedMs;
+	uint8_t handoffOldChannel;
 };
 
 void rfRecoveryRequestAmbientSurvey();

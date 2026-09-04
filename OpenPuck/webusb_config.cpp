@@ -480,7 +480,9 @@ static bool webusbSendRfStatus()
 		return false;
 	static RfRecoveryStatus status;
 	rfRecoveryStatusSnapshot(&status);
-	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9];
+	// Four-byte trailer after the counted channel rows adds live handoff telemetry without shifting
+	// the v1 header/row offsets, so older panels can safely ignore it.
+	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4];
 	uint8_t *q = f + 2;
 	f[0] = 0xAD;
 	f[1] = (uint8_t)(sizeof f - 2u);
@@ -509,6 +511,10 @@ static bool webusbSendRfStatus()
 		*q++ = entry.penalty;
 		*q++ = entry.recentOrder;
 	}
+	*q++ = status.handoffPhase;
+	*q++ = (uint8_t)status.handoffElapsedMs;
+	*q++ = (uint8_t)(status.handoffElapsedMs >> 8);
+	*q++ = status.handoffOldChannel;
 	if (tud_vendor_write_available() < sizeof f)
 		return false;
 	usb_web.write(f, sizeof f);

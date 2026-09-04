@@ -273,16 +273,17 @@
         <div class="stat"><div class="k">Ambient survey</div><div class="v" id="rfSurveyState">—</div></div>
         <div class="stat"><div class="k">Journal sequence</div><div class="v" id="rfJournalSeq">—</div></div>
         <div class="stat"><div class="k">Journal writes this boot</div><div class="v" id="rfJournalWrites">—</div></div>
+        <div class="stat"><div class="k">Handoff status</div><div class="v" id="rfHandoffStatus" style="font-size:14px">Idle</div></div>
       </div>
       <div class="row" style="margin-top:10px">
         <button id="rfRefresh">Refresh RF status</button>
         <button id="rfSurvey" style="margin-left:8px">Survey ambient RF</button>
-        <span class="note" id="rfSurveyNote" style="flex:1">Ambient scans run only while no controller is linked; a request made while linked is queued.</span>
+        <span class="note" id="rfSurveyNote" style="flex:1">An explicit survey runs immediately, even while a controller is linked; brief input jitter may occur.</span>
       </div>
-      <p class="note" style="margin-top:10px"><strong>Manual Hop:</strong> after clicking Hop, use the controller once, then release all controls to neutral. A completely idle controller waits for fresh post-request input before the guarded hop can begin. <strong>Startup</strong> saves that channel for the next boot only; it does not mark the channel good, and automatic RF learning may replace it later.</p>
+      <p class="note" style="margin-top:10px"><strong>Manual Hop:</strong> clicking Hop immediately negotiates the channel change for every live controller.<br><strong>Startup</strong> saves that channel for the next boot, and automatic RF learning may replace it later.</p>
       <div style="overflow-x:auto;margin-top:12px">
         <table style="width:100%;border-collapse:collapse;font-size:0.88em">
-          <thead><tr><th>Ch</th><th>MHz</th><th>Journal</th><th>Worst</th><th>Mean</th><th>Confidence</th><th>Trials</th><th>Penalty</th><th>Ambient</th><th>Recent</th><th>Actions</th></tr></thead>
+          <thead><tr style="text-align:left"><th>Channel</th><th>MHz</th><th>Journal</th><th>Worst</th><th>Mean</th><th>Confidence</th><th>Trials</th><th>Penalty</th><th>Ambient</th><th>Recent</th><th>Actions</th></tr></thead>
           <tbody id="rfJournalBody"></tbody>
         </table>
       </div>
@@ -761,7 +762,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
 function rfChLabel(ch){ return ch ? `Ch ${ch} · ${2400+ch} MHz` : "—"; }
@@ -776,20 +777,33 @@ function applyRfStatus(p){
   $("#rfJournalSeq").textContent=String(seq);
   $("#rfJournalWrites").textContent=String(writes);
   const running=!!(flags&1), pending=!!(flags&2), ambient=!!(flags&4), live=!!(flags&8), handoff=!!(flags&16);
-  $("#rfSurveyState").textContent=running?"running":pending?"queued until idle":ambient?`cached #${generation}`:"not sampled";
-  $("#rfSurveyNote").textContent=live&&pending?"Survey queued; it will start after the link has been idle for 10 seconds.":running?"Sampling the progressive channel pool in small idle-only steps.":"Ambient scans run only while no controller is linked; a request made while linked is queued.";
+  const tail=13+count*9;
+  const hopPhase=p.length>=tail+4?p[tail]:0;
+  const hopElapsed=p.length>=tail+4?(p[tail+1]|(p[tail+2]<<8)):0;
+  const hopOld=p.length>=tail+4?p[tail+3]:0;
+  const hopPhaseText=["Idle","Waiting for neutral","Authorizing","Switching","Acquiring","Reconciling","Rolling back","Reacquiring"];
+  let hopText=hopPhaseText[hopPhase]||("Phase "+hopPhase);
+  if(hopPhase===2||hopPhase===3||hopPhase===4) hopText+=(target?` Ch ${target}`:"");
+  else if(hopPhase>=5) hopText+=(hopOld?` Ch ${hopOld}`:"");
+  if(hopPhase) hopText+=` · ${hopElapsed} ms`;
+  $("#rfHandoffStatus").textContent=hopText;
+  rfHandoffActive=handoff;
+  if(rfHopPending&&!handoff) rfHopPending=false;
+  $("#rfSurveyState").textContent=running?"running":pending?(handoff?"queued for handoff":"requested"):ambient?`cached #${generation}`:"not sampled";
+  $("#rfSurveyNote").textContent=handoff&&pending?"Survey queued until the current RF hop or rollback completes.":pending?"Survey requested.":running&&live?"Sampling now.":running?"Sampling the progressive channel pool.":"Click Survey to sample now.";
   const body=$("#rfJournalBody"), bars=$("#rfAmbientBars"); body.innerHTML=""; bars.innerHTML=""; rfPoolChannels=new Set();
   for(let i=0;i<count;i++){
     const q=13+i*9; if(q+9>p.length) break;
     const ch=p[q], noise=p[q+1], d=p[q+2], worst=p[q+3], mean=p[q+4], conf=p[q+5], trials=p[q+6], penalty=p[q+7], recent=p[q+8];
     rfPoolChannels.add(ch);
-    const tr=document.createElement("tr");
+    const tr=document.createElement("tr"); tr.dataset.rfCh=String(ch);
     const desig=RF_DESIG[d]||("state "+d);
-    tr.innerHTML=`<td>${ch}${ch===current?' <span class="pill up">active</span>':''}${ch===target?' <span class="pill">target</span>':''}</td><td>${2400+ch}</td><td>${desig}</td><td>${trials?worst+'%':'—'}</td><td>${trials?mean+'%':'—'}</td><td>${trials?conf:'—'}</td><td>${trials}</td><td>${trials?penalty:'—'}</td><td>${noise?'-'+noise+' dBm':'—'}</td><td>${recent||'—'}</td>`;
+    tr.innerHTML=`<td>${ch}${ch===current?' <span class="pill up">active</span>':''}${ch===target?' <span class="pill rf-target">target</span>':''}</td><td>${2400+ch}</td><td>${desig}</td><td>${trials?worst+'%':'—'}</td><td>${trials?mean+'%':'—'}</td><td>${trials?conf:'—'}</td><td>${trials}</td><td>${trials?penalty:'—'}</td><td>${noise?'-'+noise+' dBm':'—'}</td><td>${recent||'—'}</td>`;
     const hopCell=document.createElement("td");
     const hopBtn=document.createElement("button");
     hopBtn.textContent=ch===current?"Active":"Hop";
-    hopBtn.disabled=ch===current||!live||handoff;
+    hopBtn.dataset.rfHop="1";
+    hopBtn.disabled=ch===current||handoff||rfHopPending;
     hopBtn.style.padding="4px 8px";
     hopBtn.addEventListener("click",()=>manualHopRf(ch));
     hopCell.appendChild(hopBtn);
@@ -809,20 +823,58 @@ function applyRfStatus(p){
     bars.appendChild(col);
   }
 }
+function setRfHopButtonsDisabled(disabled){
+  rfHopPending=!!disabled;
+  for(const tr of $("#rfJournalBody").querySelectorAll("tr")){
+    const btn=tr.querySelector("button[data-rf-hop]"); if(!btn) continue;
+    btn.disabled=rfHopPending||rfHandoffActive||btn.textContent==="Active";
+  }
+}
+function showRfHopTarget(ch){
+  $("#rfTargetCh").textContent=rfChLabel(ch);
+  for(const tr of $("#rfJournalBody").querySelectorAll("tr")){
+    const cell=tr.cells[0]; if(!cell) continue;
+    for(const badge of cell.querySelectorAll(".rf-target")) badge.remove();
+    if(+tr.dataset.rfCh===ch){
+      const badge=document.createElement("span"); badge.className="pill rf-target"; badge.textContent="target";
+      cell.append(" ",badge);
+    }
+  }
+}
+async function waitRfUiIdle(){
+  for(let i=0;i<100&&rfBusy&&dev;i++) await new Promise(resolve=>setTimeout(resolve,50));
+  return !!dev&&!rfBusy;
+}
 async function manualHopRf(ch){
-  if(!dev||isDongle||!rfCapable||rfBusy||!rfPoolChannels.has(ch)) return;
+  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfHopPending||rfHandoffActive) return;
+  setRfHopButtonsDisabled(true);
+  showRfHopTarget(ch);
+  if(!(await waitRfUiIdle())){ setRfHopButtonsDisabled(false); return; }
   rfBusy=true;
   try{
     await waitIdle(); if(!dev) return;
     await send([0x02,99,ch]);
     const ack=await readBlob(); if(ack) applyBlob(ack);
-    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    let p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    // The command reply is normally captured while the handoff is still active.
+    // Follow it to completion so the next manual Hop becomes available promptly
+    // instead of leaving the buttons frozen on that transient status snapshot.
+    for(let i=0;i<30&&(!p||(p[1]&16));i++){
+      await new Promise(resolve=>setTimeout(resolve,100));
+      await send([0x02,97,1]);
+      const statusAck=await readBlob(); if(statusAck) applyBlob(statusAck);
+      p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    }
     rfLastRefresh=Date.now();
   }catch(e){ log("RF hop err: "+e.message); }
-  finally{ rfBusy=false; }
+  finally{
+    rfBusy=false;
+    if(!rfHandoffActive) setRfHopButtonsDisabled(false);
+  }
 }
 async function manualStartupRf(ch){
-  if(!dev||isDongle||!rfCapable||rfBusy||!rfPoolChannels.has(ch)) return;
+  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)) return;
+  if(!(await waitRfUiIdle())) return;
   rfBusy=true;
   try{
     await waitIdle(); if(!dev) return;
@@ -831,6 +883,21 @@ async function manualStartupRf(ch){
     const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
     rfLastRefresh=Date.now();
   }catch(e){ log("RF startup err: "+e.message); }
+  finally{ rfBusy=false; }
+}
+async function manualSurveyRf(){
+  if(!dev||isDongle||!rfCapable) return;
+  $("#rfSurveyState").textContent="requesting";
+  $("#rfSurveyNote").textContent="Survey requested.";
+  if(!(await waitRfUiIdle())) return;
+  rfBusy=true;
+  try{
+    await waitIdle(); if(!dev) return;
+    await send([0x02,98,1]);
+    const ack=await readBlob(); if(ack) applyBlob(ack);
+    const p=await readFrame(0xAD,13,256); if(p) applyRfStatus(p);
+    rfLastRefresh=Date.now();
+  }catch(e){ log("RF survey err: "+e.message); }
   finally{ rfBusy=false; }
 }
 async function refreshRfStatus(survey=false){
@@ -2424,7 +2491,7 @@ $("#rumbleStyle").addEventListener("change", ()=>setField(39, +$("#rumbleStyle")
 $("#rumbleScale").addEventListener("change", ()=>setField(22, (+$("#rumbleScale").value)/2));
 $("#swGyroMap").addEventListener("change", ()=>setField(38, +$("#swGyroMap").value));
 $("#rfRefresh").onclick=()=>refreshRfStatus(false);
-$("#rfSurvey").onclick=()=>refreshRfStatus(true);
+$("#rfSurvey").onclick=()=>manualSurveyRf();
 for(const sel of document.querySelectorAll("select.chord")){
   sel.addEventListener("change", ()=>setField(CHORD_FIELD[+sel.dataset.i], +sel.value));
 }

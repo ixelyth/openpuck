@@ -158,6 +158,8 @@ static uint8_t g_ambientWorkSamples[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
 static bool g_ambientStableValid = false;
 static bool g_ambientSurveyRunning = false;
 static bool g_ambientSurveyPending = false;
+// An explicit WebUSB survey may borrow the radio while a controller is live.
+static bool g_ambientSurveyManual = false;
 static uint8_t g_ambientSurveyIndex = 0;
 static uint8_t g_ambientSurveyPass = 0;
 static uint16_t g_ambientSurveyGeneration = 0;
@@ -297,8 +299,12 @@ static uint8_t g_rfChHandoffOld = 0;
 static uint8_t g_rfChHandoffTarget = 0;
 static uint8_t g_rfChHandoffMask = 0;
 static unsigned long g_rfChHandoffStartedMs = 0;
+// Separate from g_rfChHandoffStartedMs: authorization resets that timer for the host-grace window,
+// while the panel needs elapsed time from the original recovery request.
+static unsigned long g_rfChHandoffTelemetryStartedMs = 0;
 static unsigned long g_rfChHandoffPhaseMs = 0;
 static bool g_rfChHandoffRequireActivityCycle = true;
+static bool g_rfChHandoffManualImmediate = false;
 static uint32_t g_rfChHandoffReplyBaseline[NSLOT] = {};
 
 // Decode-time activity latch. Updated from fresh 0x42/0x45/0x47 controller input.
@@ -667,7 +673,8 @@ static int rfChannelHistoryPoolIndex(uint8_t ch)
 
 static uint8_t rfAmbientMeasureChannel(uint8_t ch, uint16_t sampleUs)
 {
-	const uint8_t restoreCh = g_rfCh;
+	const uint8_t restoreCh = rfChannelLiveMask(millis()) ? g_sessCh :
+								g_rfCh;
 	rfConfig(ch);
 	NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk;
 	NRF_RADIO->EVENTS_READY = 0;
@@ -714,6 +721,7 @@ static uint8_t rfAmbientMeasureChannel(uint8_t ch, uint16_t sampleUs)
 
 void rfRecoveryRequestAmbientSurvey()
 {
+	g_ambientSurveyManual = true;
 	g_ambientSurveyPending = true;
 }
 
@@ -751,17 +759,30 @@ static void rfAmbientSurveyTask()
 	const bool live = rfChannelLiveMask(now) != 0u;
 	const bool handoff = g_rfChHandoffState != RF_CH_IDLE ||
 			     g_rfChGroupActive;
-	if (live || handoff) {
+	if (handoff) {
+		g_ambientSurveyIdleSinceMs = 0;
+		if (g_ambientSurveyRunning) {
+			rfAmbientSurveyAbort();
+			if (g_ambientSurveyManual)
+				g_ambientSurveyPending = true;
+		}
+		return;
+	}
+	if (live && !g_ambientSurveyManual) {
 		g_ambientSurveyIdleSinceMs = 0;
 		if (g_ambientSurveyRunning)
 			rfAmbientSurveyAbort();
 		return;
 	}
-	if (!g_ambientSurveyIdleSinceMs)
-		g_ambientSurveyIdleSinceMs = now;
-	if ((uint32_t)(now - g_ambientSurveyIdleSinceMs) <
-	    RF_AMBIENT_SURVEY_IDLE_GUARD_MS)
-		return;
+	if (!g_ambientSurveyManual) {
+		if (!g_ambientSurveyIdleSinceMs)
+			g_ambientSurveyIdleSinceMs = now;
+		if ((uint32_t)(now - g_ambientSurveyIdleSinceMs) <
+		    RF_AMBIENT_SURVEY_IDLE_GUARD_MS)
+			return;
+	} else {
+		g_ambientSurveyIdleSinceMs = 0;
+	}
 
 	const bool stale = !g_ambientStableValid ||
 			   (uint32_t)(now - g_ambientSurveyLastCompleteMs) >=
@@ -800,6 +821,7 @@ static void rfAmbientSurveyTask()
 		g_ambientSurveyLastCompleteMs = now;
 	}
 	rfAmbientSurveyAbort();
+	g_ambientSurveyManual = false;
 }
 
 static uint8_t rfChannelHistoryDesignation(uint8_t index)
@@ -896,6 +918,31 @@ rfChannelHistorySelectBestRemaining(uint8_t current,
 	return best < 0 ? 0 : g_recoveryChannelPool[best];
 }
 
+static uint8_t rfRecoveryHandoffPhase()
+{
+	if (!g_rfChGroupActive)
+		return RF_RECOVERY_HANDOFF_IDLE;
+	switch (g_rfChGroupPhase) {
+	case RF_GROUP_HOP_PENDING:
+		return g_rfChHandoffManualImmediate ?
+			       RF_RECOVERY_HANDOFF_AUTHORIZE :
+			       RF_RECOVERY_HANDOFF_WAIT_NEUTRAL;
+	case RF_GROUP_AUTHORIZED_WAIT_SWITCH:
+		return RF_RECOVERY_HANDOFF_SWITCH;
+	case RF_GROUP_TARGET_ACQUIRE:
+		return RF_RECOVERY_HANDOFF_ACQUIRE_TARGET;
+	case RF_GROUP_PARTIAL_WAIT_ROLLBACK:
+		return RF_RECOVERY_HANDOFF_RECONCILE;
+	case RF_GROUP_ROLLBACK_WAIT_SWITCH:
+		return RF_RECOVERY_HANDOFF_ROLLBACK_SWITCH;
+	case RF_GROUP_PARTIAL_ACQUIRE_OLD:
+	case RF_GROUP_ROLLBACK_ACQUIRE_OLD:
+		return RF_RECOVERY_HANDOFF_ACQUIRE_OLD;
+	default:
+		return RF_RECOVERY_HANDOFF_IDLE;
+	}
+}
+
 void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 {
 	if (!status)
@@ -919,13 +966,24 @@ void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 	if (g_channelJournalLiveWriteUnsafe)
 		status->flags |= 0x80u;
 	status->currentChannel = g_sessCh;
-	status->targetChannel = g_recoveryTargetChannel;
+	status->targetChannel =
+		(g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive) ?
+			g_rfChHandoffTarget :
+			g_recoveryTargetChannel;
 	status->startupChannel =
 		g_rfStartupLastGoodChannel ? g_rfStartupLastGoodChannel : 18u;
 	status->channelCount = RF_CHANNEL_HISTORY_POOL_COUNT;
 	status->journalWrites = g_channelHistoryPersistentWrites;
 	status->ambientGeneration = g_ambientSurveyGeneration;
 	status->journalSequence = g_channelJournalSequence;
+	status->handoffPhase = rfRecoveryHandoffPhase();
+	status->handoffOldChannel = g_rfChHandoffOld;
+	if (status->handoffPhase != RF_RECOVERY_HANDOFF_IDLE) {
+		const uint32_t elapsed =
+			(uint32_t)(millis() - g_rfChHandoffTelemetryStartedMs);
+		status->handoffElapsedMs =
+			elapsed > 0xFFFFu ? 0xFFFFu : (uint16_t)elapsed;
+	}
 	for (uint8_t i = 0; i < RF_CHANNEL_HISTORY_POOL_COUNT; i++) {
 		RfChannelStatusEntry &entry = status->channel[i];
 		entry.channel = g_recoveryChannelPool[i];
@@ -1667,6 +1725,13 @@ static void rfLinkQualityTask()
 	const unsigned long now = millis();
 	rfChannelHistoryEnsureLoaded();
 	rfChannelHistoryMaybeCheckpoint(now);
+	if (g_ambientSurveyManual) {
+		for (int s = 0; s < NSLOT; s++)
+			rfLinkQualityResetWindow(s);
+		g_linkQualityCheckMs = now;
+		g_qosCheckMs = now;
+		return;
+	}
 	if (!g_qos)
 		return;
 	if ((uint32_t)(now - g_qosCheckMs) < RF_LINK_QUALITY_WINDOW_MS)
@@ -1900,6 +1965,8 @@ static void rfChannelGroupReset()
 	g_rfChGroupSawActivitySincePending = false;
 	g_rfChGroupNeutralStartValid = false;
 	g_rfChGroupNeutralStartMs = 0;
+	g_rfChHandoffManualImmediate = false;
+	g_rfChHandoffTelemetryStartedMs = 0;
 	memset(g_rfChGroupActivitySeqSeen, 0,
 	       sizeof g_rfChGroupActivitySeqSeen);
 	memset(g_rfChGroupReportSeqSeen, 0, sizeof g_rfChGroupReportSeqSeen);
@@ -1940,7 +2007,7 @@ static void rfChannelGroupAbort()
 }
 
 static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
-				unsigned long now)
+				unsigned long now, bool manualImmediate)
 {
 	if (!mask)
 		return false;
@@ -1949,8 +2016,10 @@ static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 	g_rfChHandoffTarget = newCh;
 	g_rfChHandoffMask = mask;
 	g_rfChHandoffStartedMs = now;
+	g_rfChHandoffTelemetryStartedMs = now;
 	g_rfChHandoffPhaseMs = now;
 	g_rfChHandoffRequireActivityCycle = true;
+	g_rfChHandoffManualImmediate = manualImmediate;
 
 	g_rfChGroupActive = true;
 	g_rfChGroupPhase = RF_GROUP_HOP_PENDING;
@@ -2071,9 +2140,16 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 		return;
 
 	if (g_rfChGroupPhase == RF_GROUP_HOP_PENDING) {
-		if (!rfChannelGroupFreshNeutral(now))
-			return;
-		g_rfChHandoffRequireActivityCycle = false;
+		if (g_rfChHandoffManualImmediate) {
+			if (rfChannelLiveMask(now) != g_rfChGroupParticipants) {
+				rfChannelGroupAbort();
+				return;
+			}
+		} else {
+			if (!rfChannelGroupFreshNeutral(now))
+				return;
+			g_rfChHandoffRequireActivityCycle = false;
+		}
 		g_rfChGroupSawActivitySincePending = false;
 		rfChannelGroupResetNeutralProof();
 
@@ -2138,6 +2214,10 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 
 	if (g_rfChGroupPhase == RF_GROUP_PARTIAL_ACQUIRE_OLD) {
 		if (rfChannelFreshReply(g_rfChGroupParticipants, now)) {
+			if (g_rfChHandoffManualImmediate) {
+				rfChannelGroupAbort();
+				return;
+			}
 			// Everyone is confirmed back on the old session. Keep the same recovery
 			// request alive, but require a brand-new shared activity cycle
 			// before another group authorization attempt.
@@ -2201,7 +2281,7 @@ void rfHopTo(uint8_t newCh)
 	if (!mask)
 		return;
 
-	(void)rfChannelGroupBegin(g_sessCh, newCh, mask, now);
+	(void)rfChannelGroupBegin(g_sessCh, newCh, mask, now, false);
 }
 
 bool rfRecoveryRequestManualHop(uint8_t channel)
@@ -2211,11 +2291,30 @@ bool rfRecoveryRequestManualHop(uint8_t channel)
 	if (channel == g_sessCh || g_rfChHandoffState != RF_CH_IDLE ||
 	    g_rfChGroupActive)
 		return false;
-	if (!rfChannelLiveMask(millis()))
-		return false;
+	const unsigned long now = millis();
+	const uint8_t mask = rfChannelLiveMask(now);
+	if (!mask) {
+		g_sessCh = channel;
+		g_rfCh = channel;
+		g_lastSessBeacon = 0;
+		g_lastDisc = 0;
+		g_lastChannelHopMs = now;
+		g_qosLastHopMs = now;
+		g_linkQualityCheckMs = now;
+		g_qosCheckMs = now;
+		for (int s = 0; s < NSLOT; s++) {
+			rfLinkQualityResetWindow(s);
+			g_linkQualityBadStreak[s] = 0;
+		}
+		rfChannelRecoverySyncResidence();
+		(void)rfChannelRecoverySetTarget(0u);
+		rfChannelEvidenceSyncResidence();
+		rfChannelHistorySyncResidence();
+		rfConfig(channel);
+		return true;
+	}
 
-	rfHopTo(channel);
-	return g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive;
+	return rfChannelGroupBegin(g_sessCh, channel, mask, now, true);
 }
 
 // TX one connected packet [LEN][S1][payload] on channel ch, then RX the reply into rfrx; decodes 0xF1.
