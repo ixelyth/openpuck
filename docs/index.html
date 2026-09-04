@@ -841,7 +841,7 @@ function applyRfStatus(p){
     const hopBtn=document.createElement("button");
     hopBtn.textContent=ch===current?"Active":"Hop";
     hopBtn.dataset.rfHop="1";
-    hopBtn.disabled=ch===current||handoff||rfHopPending||rfBuilderActive;
+    hopBtn.disabled=ch===current||rfManualHopWorkflowBlocked()||rfHopPending||rfBuilderActive;
     hopBtn.style.padding="4px 8px";
     hopBtn.addEventListener("click",()=>manualHopRf(ch));
     hopCell.appendChild(hopBtn);
@@ -867,6 +867,11 @@ function rfBuilderWorkflowBlocked(){
   // handoff phase remains non-preemptible.
   return (rfHandoffActive||rfHopPending) && !(rfHandoffActive&&rfHandoffPhase===1);
 }
+function rfManualHopWorkflowBlocked(){
+  // An explicit manual hop may also replace automatic Waiting-for-neutral.
+  // Manual authorization and every post-E4 phase remain non-preemptible.
+  return rfHandoffActive&&rfHandoffPhase!==1;
+}
 function syncRfBuilderDisabled(){
   $("#rfBuilder").disabled=rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&rfBuilderWorkflowBlocked());
 }
@@ -874,7 +879,7 @@ function setRfHopButtonsDisabled(disabled){
   rfHopPending=!!disabled;
   for(const tr of $("#rfJournalBody").querySelectorAll("tr")){
     const btn=tr.querySelector("button[data-rf-hop]"); if(!btn) continue;
-    btn.disabled=rfHopPending||rfHandoffActive||rfBuilderActive||btn.textContent==="Active";
+    btn.disabled=rfHopPending||rfManualHopWorkflowBlocked()||rfBuilderActive||btn.textContent==="Active";
   }
   // Keep the Builder interlock synchronized with the local Hop latch as well
   // as firmware handoff state. The terminal status frame arrives before the
@@ -898,7 +903,7 @@ async function waitRfUiIdle(){
   return !!dev&&!rfBusy;
 }
 async function manualHopRf(ch){
-  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfHopPending||rfHandoffActive) return;
+  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfHopPending||rfManualHopWorkflowBlocked()) return;
   setRfHopButtonsDisabled(true);
   rfHopRequestedCh=ch;
   rfHopSawHandoff=false;

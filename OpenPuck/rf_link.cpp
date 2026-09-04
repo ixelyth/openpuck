@@ -2115,6 +2115,10 @@ static void rfChannelEvidenceSyncResidence()
 		return;
 	g_channelEvidenceResidenceChannel = g_sessCh;
 	g_channelRecoveryDecidedThisResidence = false;
+	// QoS bad-window streaks are residence-local evidence. Never let a prior
+	// channel contribute bad windows toward recovery on the newly selected one.
+	for (int s = 0; s < NSLOT; s++)
+		g_linkQualityBadStreak[s] = 0;
 }
 
 static void rfChannelEvidenceObserve(uint8_t slot, uint8_t ch,
@@ -2920,8 +2924,32 @@ void rfHopTo(uint8_t newCh)
 
 bool rfRecoveryRequestManualHop(uint8_t channel)
 {
-	if (rfJournalBuilderActive())
+	if (rfJournalBuilderActive() || rfChannelHistoryPoolIndex(channel) < 0)
 		return false;
+	if (channel == g_sessCh)
+		return true;
+
+	// Like Builder admission, an explicit manual hop may supersede only an
+	// automatic recovery that is still waiting for neutral before any E4
+	// authorization. Every later handoff phase remains non-preemptible.
+	if (g_rfChGroupActive && g_rfChGroupPhase == RF_GROUP_HOP_PENDING &&
+	    !g_rfChHandoffManualImmediate)
+		rfChannelGroupAbort();
+	if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
+		return false;
+
+	const unsigned long now = millis();
+	// Manual selection starts a fresh QoS residence. Disarm any stale automatic
+	// target, discard prior-channel bad streaks, and grant the normal residency
+	// interval even if this manual attempt later rolls back to the old channel.
+	(void)rfChannelRecoverySetTarget(0u);
+	g_recoveryResidenceChannel = g_sessCh;
+	g_recoveryRequestedThisResidence = false;
+	g_channelRecoveryDecidedThisResidence = false;
+	for (int s = 0; s < NSLOT; s++)
+		g_linkQualityBadStreak[s] = 0;
+	g_qosLastHopMs = now;
+
 	return rfJournalBuilderImmediateHop(channel);
 }
 
