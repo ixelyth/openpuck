@@ -1,0 +1,26 @@
+name: Temporary Switch2Pro merged-tree format check
+
+on:
+  push:
+    branches:
+      - switch2pro-merge-repair-validate
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v7
+
+      - name: Install clang-format 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Run repository checks
+        run: |
+          make check
+          git diff --check
