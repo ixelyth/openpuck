@@ -1,0 +1,149 @@
+name: F27-M11 paired Joy-Con 2 R mouse-feature discriminator
+
+on:
+  push:
+    branches:
+      - f27-joycon2-m11
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M11
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compose Makerdiary build support
+        run: |
+          set -eu
+          git fetch origin makerdiary-mdk
+          git cherry-pick --no-commit aa4a619e52be052d683ea6db1a3dd2ee96f19420
+
+      - name: Apply isolated F27 hooks
+        run: python3 tools/f27_joycon2_poc.py
+
+      - name: Apply M1 mouse-negotiation hooks
+        run: python3 tools/f27_joycon2_m1.py
+
+      - name: Apply M2 forced-mouse hook
+        run: python3 tools/f27_joycon2_m2.py
+
+      - name: Apply M3 stationary-carrier hook
+        run: python3 tools/f27_joycon2_m3.py
+
+      - name: Apply M11 paired mouse-feature discriminator
+        run: python3 tools/f27_joycon2_m11.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify experiment source
+        run: |
+          make format
+          make check
+          git diff --check
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Keep both packages intentionally unpinned, matching makerdiary-mdk.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build F27-M11 ON discriminator
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M11-ON-JCR-${short}" ./gen_version.sh
+
+          mkdir -p build/f27-m11-on build/cache/f27-m11-on
+          make build \
+            BUILD_PATH=build/cache/f27-m11-on \
+            OUTPUT_DIR=build/f27-m11-on \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2 -DOPK_F27_M11_TRIGGER_ON_FEATURE=1"
+          ./gen_uf2.sh build/f27-m11-on/OpenPuck.ino.hex \
+            build/f27-m11-on/OpenPuck-F27-M11-ON-JoyCon2-R-standard.uf2
+
+          rm -rf build/mdk build/cache/mdk
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2 -DOPK_F27_M11_TRIGGER_ON_FEATURE=1"
+          cp build/mdk/OpenPuck.ino.hex build/f27-m11-on/OpenPuck-F27-M11-ON-JoyCon2-R-MDK.hex
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/f27-m11-on/OpenPuck-F27-M11-ON-JoyCon2-R-MDK.uf2
+
+      - name: Build F27-M11 OFF discriminator
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M11-OFF-JCR-${short}" ./gen_version.sh
+
+          mkdir -p build/f27-m11-off build/cache/f27-m11-off
+          make build \
+            BUILD_PATH=build/cache/f27-m11-off \
+            OUTPUT_DIR=build/f27-m11-off \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2 -DOPK_F27_M11_TRIGGER_ON_FEATURE=0"
+          ./gen_uf2.sh build/f27-m11-off/OpenPuck.ino.hex \
+            build/f27-m11-off/OpenPuck-F27-M11-OFF-JoyCon2-R-standard.uf2
+
+          rm -rf build/mdk build/cache/mdk
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2 -DOPK_F27_M11_TRIGGER_ON_FEATURE=0"
+          cp build/mdk/OpenPuck.ino.hex build/f27-m11-off/OpenPuck-F27-M11-OFF-JoyCon2-R-MDK.hex
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/f27-m11-off/OpenPuck-F27-M11-OFF-JoyCon2-R-MDK.uf2
+
+      - name: Record paired experiment manifest
+        run: |
+          cat > build/F27-M11-JoyCon2-R.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          base_f27=7eed27fda7813289cab3a0da3468bf362d6c29a3
+          base_m1=2816b04f4a721f2ee0e8f4526d5fa8abc5335710
+          base_m2=6fdda64fea86451a3170c85a638faad6744669f6
+          base_m3=1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          makerdiary=aa4a619e52be052d683ea6db1a3dd2ee96f19420
+          target=JoyCon2-R-M11-paired
+          on_define=OPK_F27_M11_TRIGGER_ON_FEATURE=1
+          off_define=OPK_F27_M11_TRIGGER_ON_FEATURE=0
+          experiment=paired binary discriminator for tracked native mouse feature bit 0x10 on hardware-working M3/R
+          diagnostic_on=right-pad movement -> R only when feature0x10 is ON
+          diagnostic_off=right-pad movement -> R only when feature0x10 is OFF
+          unchanged=M3 native report08 mouse fields/carrier/identity/negotiation, M2 forced mouse gate, M1 status/feature replies, 250Hz cadence; no M4-M10 runtime changes
+          EOF
+          sha256sum \
+            build/f27-m11-on/OpenPuck-F27-M11-ON-JoyCon2-R-MDK.uf2 \
+            build/f27-m11-off/OpenPuck-F27-M11-OFF-JoyCon2-R-MDK.uf2 \
+            >> build/F27-M11-JoyCon2-R.manifest.txt
+
+      - name: Upload F27-M11 paired R targets
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M11-JoyCon2-R-paired
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-m11-on/OpenPuck-F27-M11-ON-JoyCon2-R-standard.uf2
+            build/f27-m11-on/OpenPuck.ino.hex
+            build/f27-m11-on/OpenPuck-F27-M11-ON-JoyCon2-R-MDK.uf2
+            build/f27-m11-on/OpenPuck-F27-M11-ON-JoyCon2-R-MDK.hex
+            build/f27-m11-off/OpenPuck-F27-M11-OFF-JoyCon2-R-standard.uf2
+            build/f27-m11-off/OpenPuck.ino.hex
+            build/f27-m11-off/OpenPuck-F27-M11-OFF-JoyCon2-R-MDK.uf2
+            build/f27-m11-off/OpenPuck-F27-M11-OFF-JoyCon2-R-MDK.hex
+            build/F27-M11-JoyCon2-R.manifest.txt
