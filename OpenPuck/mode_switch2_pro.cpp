@@ -78,7 +78,8 @@ static volatile uint32_t g_sw2Counter32 = 0;
 static int8_t g_sw2LastRumbleBond = -1;
 static uint16_t g_sw2LastRumbleLeft = 0;
 static uint16_t g_sw2LastRumbleRight = 0;
-static uint8_t g_sw2Map[8] = { 19, 20, 23, 22, 9, 10, 11, 18 };
+static const uint8_t def[8] = { 18, 18, 23, 22, 9, 10, 11, 21 };
+static uint8_t g_sw2Map[8];
 static bool g_sw2MapLoaded = false;
 
 static void switch2ProLoadMap()
@@ -86,13 +87,6 @@ static void switch2ProLoadMap()
 	if (g_sw2MapLoaded)
 		return;
 	g_sw2MapLoaded = true;
-	static const uint8_t legacyDef[7] = { 9, 10, 23, 22, 18, 11, 21 };
-	static const uint8_t def[8] = { 19, 20, 23, 22, 9, 10, 11, 18 };
-	const bool qamMissing = cfgExtRead(10u) == 0xffu;
-	bool migrateLegacyDefaults = qamMissing;
-	for (uint8_t i = 0; i < 7 && migrateLegacyDefaults; i++)
-		migrateLegacyDefaults = cfgExtRead((uint8_t)(3u + i)) ==
-					legacyDef[i];
 	bool normalize = false;
 	for (uint8_t i = 0; i < 8; i++) {
 		const uint8_t saved = cfgExtRead((uint8_t)(3u + i));
@@ -103,13 +97,6 @@ static void switch2ProLoadMap()
 			cfgExtWrite((uint8_t)(3u + i), def[i]);
 			normalize = true;
 		}
-	}
-	if (migrateLegacyDefaults) {
-		for (uint8_t i = 0; i < 7; i++) {
-			g_sw2Map[i] = def[i];
-			cfgExtWrite((uint8_t)(3u + i), def[i]);
-		}
-		normalize = true;
 	}
 	if (normalize)
 		saveCfg();
@@ -911,7 +898,7 @@ bool switch2ProVendorControlXfer(uint8_t rhport, uint8_t stage,
 	memcpy(g_sw2ControlReply, SW2_VENDOR_PROTOCOL,
 	       sizeof SW2_VENDOR_PROTOCOL);
 	return tud_control_xfer(rhport, request, g_sw2ControlReply,
-				sizeof SW2_VENDOR_PROTOCOL);
+					sizeof SW2_VENDOR_PROTOCOL);
 }
 
 static void sw2DriverInit(void)

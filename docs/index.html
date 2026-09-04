@@ -963,7 +963,7 @@ function applyBlob(p){
 
   // Eight Switch 2 Pro physical-source mappings occupy payload p[194..201].
   const sw2MapCap=(p[0]>=23 && p.length>201);
-  const sw2Map=sw2MapCap?p.slice(194,202):[19,20,23,22,9,10,11,18];
+  const sw2Map=sw2MapCap?p.slice(194,202):[18,18,23,22,9,10,11,21];
   // per-slot link status (protocol v8, p.length >= 73)
   const hasSlotsData = p.length >= 73;
   if (hasSlotsData) {
