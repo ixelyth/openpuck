@@ -822,6 +822,7 @@ function applyRfStatus(p){
   rfHandoffActive=handoff;
   rfSurveyRunning=running;
   if(rfHopPending&&handoff) rfHopSawHandoff=true;
+  if(rfHopPending&&!rfHopRequestedCh&&!handoff) rfHopPending=false;
   $("#rfSurveyState").textContent=running?(surveyChannel?`surveying Ch ${surveyChannel}`:"surveying"):pending?(handoff?"queued for handoff":"surveying"):ambient?`cached #${generation}`:"not sampled";
   $("#rfSurveyNote").textContent=handoff&&pending?"Survey queued until the current RF hop or rollback completes.":running&&surveyChannel?`Surveying Ch ${surveyChannel}.`:running?"Surveying.":pending?"Surveying.":"Click Survey to sample now.";
   const body=$("#rfJournalBody"), bars=$("#rfAmbientBars"); body.innerHTML=""; bars.innerHTML=""; rfPoolChannels=new Set();
@@ -944,7 +945,7 @@ async function manualHopRf(ch){
   finally{
     rfBusy=false;
     rfHopRequestedCh=0;
-    setRfHopButtonsDisabled(false);
+    setRfHopButtonsDisabled(rfHandoffActive);
   }
 }
 async function manualStartupRf(ch){
