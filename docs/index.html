@@ -897,11 +897,16 @@ async function manualHopRf(ch){
     await waitIdle(); if(!dev) return;
     await send([0x02,99,ch]);
     const ack=await readBlob(); if(ack) applyBlob(ack);
-    let p=await readFrame(0xAD,13,256);
-    for(let i=0;i<40;i++){
+    let p=await readFrame(0xAD,13,256), sawStatus=!!p, lastActive=false;
+    // Firmware's longest normal rollback path is longer than a simple clean
+    // acquisition, and USB/browser scheduling adds jitter. Follow firmware
+    // state rather than declaring an RF failure from a short UI stopwatch.
+    for(let i=0;i<100;i++){
       if(p){
+        sawStatus=true;
         applyRfStatus(p);
         const active=!!(p[1]&16), current=p[2];
+        lastActive=active;
         if(active) rfHopSawHandoff=true;
         if(!active&&current===ch){
           $("#rfHandoffStatus").textContent=`Complete · Ch ${ch}`;
@@ -913,10 +918,9 @@ async function manualHopRf(ch){
           terminal=true;
           break;
         }
-        // Do not treat the first idle snapshot as an acknowledgement. Give the
-        // firmware several status cycles to enter the handoff before declaring
-        // that the request never started.
-        if(!active&&!rfHopSawHandoff&&i>=4){
+        // Admission should become visible quickly. Preserve that short gate for
+        // requests that genuinely never enter the firmware handoff machine.
+        if(!active&&!rfHopSawHandoff&&i>=6){
           $("#rfHandoffStatus").textContent=`Hop not started · stayed Ch ${current}`;
           terminal=true;
           break;
@@ -927,7 +931,11 @@ async function manualHopRf(ch){
       const statusAck=await readBlob(); if(statusAck) applyBlob(statusAck);
       p=await readFrame(0xAD,13,256);
     }
-    if(!terminal) $("#rfHandoffStatus").textContent=`Hop timed out · Ch ${ch}`;
+    if(!terminal){
+      if(lastActive) $("#rfHandoffStatus").textContent=`Handoff still active · Ch ${ch}`;
+      else if(!sawStatus) $("#rfHandoffStatus").textContent="Hop outcome unknown · RF status unavailable";
+      else $("#rfHandoffStatus").textContent=`Hop outcome unknown · Ch ${ch}`;
+    }
     rfLastRefresh=Date.now();
   }catch(e){
     $("#rfHandoffStatus").textContent=`Hop error · Ch ${ch}`;

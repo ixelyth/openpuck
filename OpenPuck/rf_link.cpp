@@ -1443,6 +1443,13 @@ static void rfChannelHistorySyncResidence()
 		return;
 	g_channelHistoryResidenceChannel = g_sessCh;
 	g_channelHistoryResidenceOutcomeRecorded = false;
+	const int idx = rfChannelHistoryPoolIndex(g_sessCh);
+	if (idx >= 0) {
+		// Good/bad streaks are consecutive-residence evidence. Never carry a
+		// partial streak across a channel excursion and count it as continuous.
+		g_channelHistoryRuntimeGoodStreak[idx] = 0;
+		g_channelHistoryRuntimeBadStreak[idx] = 0;
+	}
 }
 
 static void rfChannelHistoryRecordPersistentOutcome(uint8_t ch,
@@ -2247,6 +2254,15 @@ static void rfLinkQualityTask()
 	rfChannelHistoryEnsureLoaded();
 	if (!rfJournalBuilderActive())
 		rfChannelHistoryMaybeCheckpoint(now);
+	if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive) {
+		// Handoff acquisition and rollback are transition traffic, not a stable
+		// channel residence. Discard those windows instead of learning from them.
+		for (int s = 0; s < NSLOT; s++)
+			rfLinkQualityResetWindow(s);
+		g_linkQualityCheckMs = now;
+		g_qosCheckMs = now;
+		return;
+	}
 	if (g_ambientSurveyManual) {
 		for (int s = 0; s < NSLOT; s++)
 			rfLinkQualityResetWindow(s);
@@ -2542,6 +2558,13 @@ static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 	if (!mask)
 		return false;
 
+	// Drop any partially accumulated old-channel QoS window before the
+	// transition can retune the session and accidentally attribute it elsewhere.
+	for (int s = 0; s < NSLOT; s++)
+		rfLinkQualityResetWindow(s);
+	g_linkQualityCheckMs = now;
+	g_qosCheckMs = now;
+
 	g_rfChHandoffOld = oldCh;
 	g_rfChHandoffTarget = newCh;
 	g_rfChHandoffMask = mask;
@@ -2712,6 +2735,11 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 			return;
 		rfChannelSnapshotReplies(g_rfChGroupParticipants);
 		g_sessCh = g_rfChHandoffTarget;
+		for (int s = 0; s < NSLOT; s++)
+			rfLinkQualityResetWindow(s);
+		g_linkQualityCheckMs = now;
+		g_qosCheckMs = now;
+		rfChannelHistorySyncResidence();
 		g_rfChHandoffPhaseMs = now;
 		g_rfChHandoffState = RF_CH_ACQUIRE;
 		g_rfChGroupPhase = RF_GROUP_TARGET_ACQUIRE;
@@ -2775,6 +2803,11 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 			return;
 		rfChannelSnapshotReplies(g_rfChGroupParticipants);
 		g_sessCh = g_rfChHandoffOld;
+		for (int s = 0; s < NSLOT; s++)
+			rfLinkQualityResetWindow(s);
+		g_linkQualityCheckMs = now;
+		g_qosCheckMs = now;
+		rfChannelHistorySyncResidence();
 		g_rfChHandoffState = RF_CH_ROLLBACK_ACQUIRE;
 		g_rfChGroupPhase = RF_GROUP_ROLLBACK_ACQUIRE_OLD;
 		g_rfChHandoffPhaseMs = now;
