@@ -767,6 +767,17 @@ let rfHopRequestedCh=0, rfHopSawHandoff=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
 function rfChLabel(ch){ return ch ? `Ch ${ch} · ${2400+ch} MHz` : "—"; }
+function rfElapsedLabel(ms){
+  if(ms<1000) return `${ms} ms`;
+  const s=Math.floor(ms/1000);
+  if(s<60) return `${(ms/1000).toFixed(1)} s`;
+  const m=Math.floor(s/60);
+  if(m<60) return `${m}m ${String(s%60).padStart(2,"0")}s`;
+  const h=Math.floor(m/60);
+  if(h<24) return `${h}h ${String(m%60).padStart(2,"0")}m`;
+  const d=Math.floor(h/24);
+  return `${d}d ${String(h%24).padStart(2,"0")}h`;
+}
 function applyRfStatus(p){
   if(!p || p.length<13 || p[0]!==1) return;
   const flags=p[1], current=p[2], target=p[3], startup=p[4], count=p[5];
@@ -780,7 +791,7 @@ function applyRfStatus(p){
   const running=!!(flags&1), pending=!!(flags&2), ambient=!!(flags&4), live=!!(flags&8), handoff=!!(flags&16);
   const tail=13+count*9;
   const hopPhase=p.length>=tail+4?p[tail]:0;
-  const hopElapsed=p.length>=tail+4?(p[tail+1]|(p[tail+2]<<8)):0;
+  const hopElapsed16=p.length>=tail+4?(p[tail+1]|(p[tail+2]<<8)):0;
   const hopOld=p.length>=tail+4?p[tail+3]:0;
   // The automatic-handoff trailer follows 4 handoff bytes, 7 Builder bytes,
   // and the ambient-survey channel byte. Parse it before rendering handoff state.
@@ -793,6 +804,13 @@ function applyRfStatus(p){
   const surveyRetry=p.length>=surveyDiagBase+3?p[surveyDiagBase]:0;
   const surveyFailure=p.length>=surveyDiagBase+3?p[surveyDiagBase+1]:0;
   const surveyFailureChannel=p.length>=surveyDiagBase+3?p[surveyDiagBase+2]:0;
+  const handoffElapsedBase=surveyDiagBase+3;
+  let hopElapsed=hopElapsed16;
+  if(p.length>=handoffElapsedBase+8){
+    const lo=((p[handoffElapsedBase]|(p[handoffElapsedBase+1]<<8)|(p[handoffElapsedBase+2]<<16)|(p[handoffElapsedBase+3]<<24))>>>0);
+    const hi=((p[handoffElapsedBase+4]|(p[handoffElapsedBase+5]<<8)|(p[handoffElapsedBase+6]<<16)|(p[handoffElapsedBase+7]<<24))>>>0);
+    hopElapsed=hi*4294967296+lo;
+  }
   const hopPhaseText=["Idle","Waiting for neutral","Authorizing","Switching","Acquiring","Reconciling","Rolling back","Reacquiring"];
   let hopText=hopPhaseText[hopPhase]||("Phase "+hopPhase);
   if(hopPhase===1){
@@ -802,7 +820,7 @@ function applyRfStatus(p){
   }
   if(hopPhase===2||hopPhase===3||hopPhase===4) hopText+=(target?` Ch ${target}`:"");
   else if(hopPhase>=5) hopText+=(hopOld?` Ch ${hopOld}`:"");
-  if(hopPhase) hopText+=` · ${hopElapsed} ms`;
+  if(hopPhase) hopText+=` · ${rfElapsedLabel(hopElapsed)}`;
   else if(recoveryCooldown) hopText=`Recovery cooldown · ${recoveryCooldown}s${recoveryFailedTarget?` · Ch ${recoveryFailedTarget} excluded`:""}`;
   if(hopPhase||!rfHopPending) $("#rfHandoffStatus").textContent=hopText;
   const builderBase=tail+4;
