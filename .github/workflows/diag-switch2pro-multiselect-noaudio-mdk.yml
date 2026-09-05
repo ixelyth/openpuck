@@ -1,0 +1,158 @@
+name: Switch2Pro multiselect no-audio MDK diagnostics
+
+on:
+  push:
+    branches: [diag-switch2pro-multiselect-noaudio-mdk]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        paths: [4, 6]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact PR269 ancestry and branch scope
+        run: |
+          set -eu
+          BASE=cafaba6eae52b997c685eecbaea97eb7dadfb050
+          test "$(git merge-base HEAD "$BASE")" = "$BASE"
+          git diff --name-only "$BASE"..HEAD | sort > /tmp/branch-files
+          cat /tmp/branch-files
+          test "$(wc -l < /tmp/branch-files)" -eq 2
+          grep -qx '.github/workflows/diag-switch2pro-multiselect-noaudio-mdk.yml' /tmp/branch-files
+          grep -qx 'tools/diag_switch2pro_multiselect_noaudio.py' /tmp/branch-files
+
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        # Intentionally unpinned per current OpenPuck build policy.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Apply Makerdiary MDK support only
+        run: |
+          set -eu
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --cached --check
+
+      - name: Apply Switch2Pro multiselect no-audio transform
+        env:
+          NPATHS: ${{ matrix.paths }}
+        run: |
+          set -eu
+          python3 tools/diag_switch2pro_multiselect_noaudio.py --paths "$NPATHS"
+          git diff --check
+          EXPECTED=$((NPATHS * 40 + 31))
+          VENDOR_EP=$((NPATHS + 1))
+          grep -q "sizeof SWITCH2_PRO_CFG_BODY == $EXPECTED" OpenPuck/mode_switch2_pro.cpp
+          grep -q "itf->bInterfaceNumber < $NPATHS" OpenPuck/mode_switch2_pro.cpp
+          grep -q "itf->bInterfaceNumber == $NPATHS" OpenPuck/mode_switch2_pro.cpp
+          grep -q 'sw2StampHidCounter' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'TUSB_CLASS_AUDIO' OpenPuck/mode_switch2_pro.cpp
+          mkdir -p build/diag
+          git diff -- OpenPuck/mode_switch2_pro.cpp > "build/diag/Switch2Pro-${NPATHS}Select-NoAudio.patch"
+          test -s "build/diag/Switch2Pro-${NPATHS}Select-NoAudio.patch"
+
+      - name: Generate diagnostic version
+        env:
+          NPATHS: ${{ matrix.paths }}
+        run: OPK_BUILD_VERSION="SW2P${NPATHS}SELECT-NOAUDIO-cafaba6" ./gen_version.sh
+
+      - name: Build standard target
+        run: |
+          mkdir -p build/std build/cache/std
+          make build BUILD_PATH=build/cache/std OUTPUT_DIR=build/std
+
+      - name: Build Makerdiary MDK target
+        run: make build-mdk
+
+      - name: Generate MDK UF2
+        env:
+          NPATHS: ${{ matrix.paths }}
+        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex "build/mdk/OpenPuck-Switch2Pro-${NPATHS}Select-NoAudio-MDK.uf2"
+
+      - name: Validate UF2
+        env:
+          NPATHS: ${{ matrix.paths }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, struct, hashlib
+          n=os.environ['NPATHS']
+          p=Path(f'build/mdk/OpenPuck-Switch2Pro-{n}Select-NoAudio-MDK.uf2')
+          d=p.read_bytes()
+          if len(d)%512: raise SystemExit('bad UF2 length')
+          family=None; total=None; seen=[]; image=bytearray(); addrs=[]
+          for off in range(0,len(d),512):
+              b=d[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,fam=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
+              family=fam if family is None else family
+              total=nblocks if total is None else total
+              if fam!=family or nblocks!=total: raise SystemExit('inconsistent UF2')
+              seen.append(no); addrs.append(addr)
+              if addr>=0x26000: image += b[32:32+size]
+          if family!=0xADA52840: raise SystemExit('wrong family')
+          if seen!=list(range(total)): raise SystemExit('block order')
+          marker=f'SW2P{n}SELECT-NOAUDIO-cafaba6'.encode()
+          if marker not in image: raise SystemExit('missing marker')
+          print('PASS',len(d),total,hex(min(addrs)),hex(max(addrs)+256),hashlib.sha256(d).hexdigest())
+          PY
+
+      - name: Write manifest
+        env:
+          NPATHS: ${{ matrix.paths }}
+        run: |
+          set -eu
+          if [ "$NPATHS" = 4 ]; then
+            SELECTORS='L4->HID1,R4->HID2,L5->HID3,R5->HID4'
+          else
+            SELECTORS='L4->HID1,R4->HID2,L5->HID3,R5->HID4,L4+L5->HID5,R4+R5->HID6'
+          fi
+          cat > "build/mdk/Switch2Pro-${NPATHS}Select-NoAudio.manifest.txt" <<EOF
+          purpose=Switch2Pro same-address multiselect topology discriminator
+          base=PR269 switch2pro head cafaba6eae52b997c685eecbaea97eb7dadfb050
+          device_identity=057E:2069 Nintendo Switch 2 Pro Controller
+          audio=OMITTED intentionally
+          hid_paths=$NPATHS full Pro2 HID IN/OUT interfaces
+          vendor_sessions=1 shared Nintendo vendor IN/OUT interface
+          selectors=$SELECTORS
+          neutral_policy=no exact selector match => all HID paths neutral
+          counters=independent per HID path
+          rf_sources=1 real live Steam Controller
+          reviewer_branch_modified=no
+          endpoint_budget=${NPATHS}_HID_pairs_plus_1_vendor_pair
+          EOF
+          sha256sum "build/mdk/OpenPuck-Switch2Pro-${NPATHS}Select-NoAudio-MDK.uf2" >> "build/mdk/Switch2Pro-${NPATHS}Select-NoAudio.manifest.txt"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-Switch2Pro-${{ matrix.paths }}Select-NoAudio-MDK
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-Switch2Pro-${{ matrix.paths }}Select-NoAudio-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/mdk/Switch2Pro-${{ matrix.paths }}Select-NoAudio.manifest.txt
+            build/diag/Switch2Pro-${{ matrix.paths }}Select-NoAudio.patch
