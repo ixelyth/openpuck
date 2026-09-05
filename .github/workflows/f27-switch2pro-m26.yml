@@ -67,14 +67,12 @@ jobs:
           before = Path('/tmp/m25-mode_switch2_pro.cpp').read_text()
           after = Path('OpenPuck/mode_switch2_pro.cpp').read_text()
           expected = before
-
           def repl(old, new, label):
               global expected
               n = expected.count(old)
               if n != 1:
                   raise SystemExit(f'M26 independent {label} witness count {n}, expected 1')
               expected = expected.replace(old, new, 1)
-
           repl(
               'static const char M25_BUILD_MARKER[] __attribute__((used)) =\n'
               '\t"F27-M25-IDENTITY-SWAP-JCR";\n',
@@ -84,29 +82,31 @@ jobs:
               '\t"F27-M26-INPUT-PAYLOAD-SWAP-JCR";\n',
               'marker',
           )
-          old_drain = '''\t\tif (s == M15_SW2_JOYCON_R) {
-\t\t\t// Force the unseen companion to native report 0x08.
-\t\t\trid = 0x08;
-\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);
-\t\t} else if (rid == 0x05) {
-\t\t\tsw2Build05((uint8_t)bond, p);
-\t\t} else if (!f27JoyconBuildNative((uint8_t)bond, g_sw2Features, &rid, p)) {
-\t\t\trid = 0x08;
-\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);
-\t\t}
-'''
-          new_drain = '''\t\tif (s == M15_SW2_PRO) {
-\t\t\t// M26 first function carries only the LEFT-pad mouse payload.
-\t\t\trid = 0x08;
-\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);
-\t\t} else if (rid == 0x05) {
-\t\t\t// M26 second function carries the unchanged live common payload.
-\t\t\tsw2Build05((uint8_t)bond, p);
-\t\t} else if (!f27JoyconBuildNative((uint8_t)bond, g_sw2Features, &rid, p)) {
-\t\t\trid = 0x08;
-\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);
-\t\t}
-'''
+          old_drain = (
+              '\t\tif (s == M15_SW2_JOYCON_R) {\n'
+              '\t\t\t// Force the unseen companion to native report 0x08.\n'
+              '\t\t\trid = 0x08;\n'
+              '\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);\n'
+              '\t\t} else if (rid == 0x05) {\n'
+              '\t\t\tsw2Build05((uint8_t)bond, p);\n'
+              '\t\t} else if (!f27JoyconBuildNative((uint8_t)bond, g_sw2Features, &rid, p)) {\n'
+              '\t\t\trid = 0x08;\n'
+              '\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);\n'
+              '\t\t}\n'
+          )
+          new_drain = (
+              '\t\tif (s == M15_SW2_PRO) {\n'
+              '\t\t\t// M26 first function carries only the LEFT-pad mouse payload.\n'
+              '\t\t\trid = 0x08;\n'
+              '\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);\n'
+              '\t\t} else if (rid == 0x05) {\n'
+              '\t\t\t// M26 second function carries the unchanged live common payload.\n'
+              '\t\t\tsw2Build05((uint8_t)bond, p);\n'
+              '\t\t} else if (!f27JoyconBuildNative((uint8_t)bond, g_sw2Features, &rid, p)) {\n'
+              '\t\t\trid = 0x08;\n'
+              '\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);\n'
+              '\t\t}\n'
+          )
           repl(old_drain, new_drain, 'interrupt payload block')
           repl(
               '\tasm volatile("" : : "r"(M25_BUILD_MARKER) : "memory");\n',
@@ -152,16 +152,15 @@ jobs:
               raise SystemExit('M25 companion address role not retained on session0')
           if 'if (g_sw2SessionCtx == M15_SW2_PRO) {\n\t\tconst uint32_t serialTail' not in s:
               raise SystemExit('M25 companion serial role not retained on session0')
-          # M22 GET_REPORT role must remain untouched: hidden LEFT mouse belongs to HID1 there.
-          get_anchor='''\t} else if (itf == M15_SW2_JOYCON_R) {
-\t\tif (reportId == 0x08 || reportId == 0x09)
-\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);
-\t\telse if (reportId == 0x05)
-\t\t\tsw2Build05Neutral((uint8_t)bond, p);
-'''
+          get_anchor = (
+              '\t} else if (itf == M15_SW2_JOYCON_R) {\n'
+              '\t\tif (reportId == 0x08 || reportId == 0x09)\n'
+              '\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);\n'
+              '\t\telse if (reportId == 0x05)\n'
+              '\t\t\tsw2Build05Neutral((uint8_t)bond, p);\n'
+          )
           if get_anchor not in s:
               raise SystemExit('M22 GET_REPORT ownership changed')
-          # Output/rumble ownership must remain on session0 as in M22/M25.
           out_anchor='if (itf == M15_SW2_PRO && reportType == HID_REPORT_TYPE_OUTPUT)'
           if out_anchor not in s:
               raise SystemExit('M22/M25 output ownership changed')
