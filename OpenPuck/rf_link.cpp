@@ -389,9 +389,11 @@ static uint8_t g_rfChHandoffOld = 0;
 static uint8_t g_rfChHandoffTarget = 0;
 static uint8_t g_rfChHandoffMask = 0;
 static unsigned long g_rfChHandoffStartedMs = 0;
-// Separate from g_rfChHandoffStartedMs: authorization resets that timer for the host-grace window,
-// while the panel needs elapsed time from the original recovery request.
-static unsigned long g_rfChHandoffTelemetryStartedMs = 0;
+// Separate from g_rfChHandoffStartedMs: authorization resets that timer for the
+// host-grace window. Accumulating loop-to-loop deltas keeps panel telemetry
+// correct across the 32-bit millis() wrap without affecting handoff admission.
+static uint64_t g_rfChHandoffTelemetryElapsedMs = 0;
+static uint32_t g_rfChHandoffTelemetryLastMs = 0;
 static unsigned long g_rfChHandoffPhaseMs = 0;
 static bool g_rfChHandoffRequireActivityCycle = true;
 static bool g_rfChHandoffManualImmediate = false;
@@ -1207,8 +1209,7 @@ void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 	status->handoffPhase = rfRecoveryHandoffPhase();
 	status->handoffOldChannel = g_rfChHandoffOld;
 	if (status->handoffPhase != RF_RECOVERY_HANDOFF_IDLE)
-		status->handoffElapsedMs =
-			(uint32_t)(millis() - g_rfChHandoffTelemetryStartedMs);
+		status->handoffElapsedMs = g_rfChHandoffTelemetryElapsedMs;
 	status->journalBuilderPhase = g_rfJournalBuilderPhase;
 	status->journalBuilderIndex = g_rfJournalBuilderIndex;
 	status->journalBuilderChannel = g_rfJournalBuilderChannel;
@@ -2930,7 +2931,8 @@ static void rfChannelGroupReset()
 	g_rfChGroupNeutralStartValid = false;
 	g_rfChGroupNeutralStartMs = 0;
 	g_rfChHandoffManualImmediate = false;
-	g_rfChHandoffTelemetryStartedMs = 0;
+	g_rfChHandoffTelemetryElapsedMs = 0;
+	g_rfChHandoffTelemetryLastMs = 0;
 	g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_NONE;
 	g_rfChHandoffNeutralMs = 0;
 	memset(g_rfChGroupActivitySeqSeen, 0,
@@ -2979,7 +2981,8 @@ static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 	g_rfChHandoffTarget = newCh;
 	g_rfChHandoffMask = mask;
 	g_rfChHandoffStartedMs = now;
-	g_rfChHandoffTelemetryStartedMs = now;
+	g_rfChHandoffTelemetryElapsedMs = 0;
+	g_rfChHandoffTelemetryLastMs = (uint32_t)now;
 	g_rfChHandoffPhaseMs = now;
 	g_rfChHandoffRequireActivityCycle = true;
 	g_rfChHandoffManualImmediate = manualImmediate;
@@ -3090,6 +3093,10 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 {
 	if (!g_rfChGroupActive)
 		return;
+
+	g_rfChHandoffTelemetryElapsedMs +=
+		(uint32_t)((uint32_t)now - g_rfChHandoffTelemetryLastMs);
+	g_rfChHandoffTelemetryLastMs = (uint32_t)now;
 
 	if (g_rfChGroupPhase == RF_GROUP_HOP_PENDING) {
 		if (g_rfChHandoffManualImmediate) {

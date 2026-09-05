@@ -805,8 +805,12 @@ function applyRfStatus(p){
   const surveyFailure=p.length>=surveyDiagBase+3?p[surveyDiagBase+1]:0;
   const surveyFailureChannel=p.length>=surveyDiagBase+3?p[surveyDiagBase+2]:0;
   const handoffElapsedBase=surveyDiagBase+3;
-  const hopElapsed=p.length>=handoffElapsedBase+4?
-    ((p[handoffElapsedBase]|(p[handoffElapsedBase+1]<<8)|(p[handoffElapsedBase+2]<<16)|(p[handoffElapsedBase+3]<<24))>>>0):hopElapsed16;
+  let hopElapsed=hopElapsed16;
+  if(p.length>=handoffElapsedBase+8){
+    const lo=((p[handoffElapsedBase]|(p[handoffElapsedBase+1]<<8)|(p[handoffElapsedBase+2]<<16)|(p[handoffElapsedBase+3]<<24))>>>0);
+    const hi=((p[handoffElapsedBase+4]|(p[handoffElapsedBase+5]<<8)|(p[handoffElapsedBase+6]<<16)|(p[handoffElapsedBase+7]<<24))>>>0);
+    hopElapsed=hi*4294967296+lo;
+  }
   const hopPhaseText=["Idle","Waiting for neutral","Authorizing","Switching","Acquiring","Reconciling","Rolling back","Reacquiring"];
   let hopText=hopPhaseText[hopPhase]||("Phase "+hopPhase);
   if(hopPhase===1){
