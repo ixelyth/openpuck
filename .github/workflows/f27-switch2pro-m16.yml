@@ -1,0 +1,191 @@
+name: F27-M16 hidden Joy-Con 2 R mouse probe
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m16-hidden-jcr-mouse
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M16
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compose accepted M15 topology and M16 mouse discriminator
+        run: |
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m16.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify pure reconciled experiment source
+        run: |
+          make format
+          make check
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/mode_switch2_pro.cpp | sort)"
+          grep -q 'M15_SW2_SESSION_COUNT = 2' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-M16-HIDDEN-JCR-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'sw2BuildJoyconRMouse' OpenPuck/mode_switch2_pro.cpp
+          grep -q 's != M15_SW2_JOYCON_R && !g_sw2InputEnabled' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_usbCfgDesc\[768\]' OpenPuck/OpenPuck.ino
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Keep both packages intentionally unpinned, matching project policy.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard F27-M16 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M16-HIDDEN-${short}" ./gen_version.sh
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M16-HiddenJoyconRMouse-standard.uf2
+          cp build/f27-standard/OpenPuck-F27-M16-HiddenJoyconRMouse-standard.uf2 /tmp/
+          cp build/f27-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M16-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Reapply M15 plus M16 over Makerdiary build composition
+        run: |
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m16.py
+          make format
+          make check
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'M15_SW2_SESSION_COUNT = 2' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-M16-HIDDEN-JCR-MOUSE' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Build Makerdiary MDK F27-M16 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M16-HIDDEN-${short}" ./gen_version.sh
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M16-HiddenJoyconRMouse-MDK.uf2
+          mkdir -p build/f27-standard
+          cp /tmp/OpenPuck-F27-M16-HiddenJoyconRMouse-standard.uf2 build/f27-standard/
+          cp /tmp/OpenPuck-F27-M16-standard.hex build/f27-standard/OpenPuck.ino.hex
+
+      - name: Validate M16 artifact identity
+        run: |
+          set -eu
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+
+          def inspect(path):
+              data = Path(path).read_bytes()
+              if len(data) % 512:
+                  raise SystemExit(f"non-UF2 length: {path}")
+              addrs = []
+              image = bytearray()
+              total = family = None
+              expected_no = 0
+              for off in range(0, len(data), 512):
+                  b = data[off:off+512]
+                  m0, m1, flags, addr, size, no, nblocks, fam = struct.unpack_from("<IIIIIIII", b, 0)
+                  if (m0, m1) != (0x0A324655, 0x9E5D5157):
+                      raise SystemExit(f"bad UF2 magic in {path}")
+                  if no != expected_no:
+                      raise SystemExit(f"non-sequential UF2 block in {path}: {no} != {expected_no}")
+                  expected_no += 1
+                  total = nblocks if total is None else total
+                  family = fam if family is None else family
+                  if nblocks != total or fam != family:
+                      raise SystemExit(f"inconsistent UF2 metadata in {path}")
+                  if addr >= 0x26000:
+                      image += b[32:32+size]
+                      addrs.append(addr)
+              if family != 0xADA52840:
+                  raise SystemExit(f"wrong family in {path}: {family:#x}")
+              if b"F27-M16-HIDDEN-" not in image:
+                  raise SystemExit(f"missing M16 build marker in {path}")
+              print(path, "PASS", "blocks", total, "family", hex(family),
+                    "range", hex(min(addrs)), hex(max(addrs)+256))
+
+          for p in [
+              "build/f27-standard/OpenPuck-F27-M16-HiddenJoyconRMouse-standard.uf2",
+              "build/mdk/OpenPuck-F27-M16-HiddenJoyconRMouse-MDK.uf2",
+          ]:
+              inspect(p)
+          PY
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M16-HiddenJoyconRMouse.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          reconciled_runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          m15_accepted_head=b6bce4d387433372f480593bd28de506ff0b5368
+          makerdiary_authority=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          target=F27-M16-HiddenJoyconRMouse
+          prior_m15_hardware=USB stable; only one visible controller; visible identity Switch2Pro; hidden JoyCon2-R function not promoted to controller slot
+          topology=unchanged M15 dual S2 functions: visible Pro2 IF0-4 EP1-3 plus hidden JoyCon2-R IF5-9 EP4-6
+          visible_session=unchanged Switch2Pro controls/gyro/rumble and host-selected report09-or05
+          hidden_session=logical JoyCon2-R PID2066, forced native report08 whenever HID instance1 is ready
+          hidden_input_enable=forced for M16 only so lack of vendor enable cannot mask the discriminator
+          mouse_source=right Steam trackpad only
+          mouse_encoding=F27-M3 scaling, dx/dy offsets, 0x17 on-surface state, and stationary 30-byte carrier forced while touched
+          hidden_buttons_stick=neutral; ordinary controls remain owned by visible Pro2 session
+          success=right Steam trackpad moves Switch pointer even though Change Grip/Order still shows only one Switch2Pro controller
+          fail=visible Pro2 remains stable but right trackpad produces no pointer motion
+          caution=experimental topology discriminator only; not production architecture
+          EOF
+          sha256sum build/f27-standard/OpenPuck-F27-M16-HiddenJoyconRMouse-standard.uf2 >> build/F27-M16-HiddenJoyconRMouse.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-M16-HiddenJoyconRMouse-MDK.uf2 >> build/F27-M16-HiddenJoyconRMouse.manifest.txt
+
+      - name: Upload F27-M16 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M16-HiddenJoyconRMouse
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M16-HiddenJoyconRMouse-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M16-HiddenJoyconRMouse-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M16-HiddenJoyconRMouse.manifest.txt
