@@ -1,0 +1,196 @@
+name: F27-M21 dual Joy-Con 2 R topology
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m21-dual-jcr
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M21
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Recover pinned M15 topology and M3 Joy-Con helpers
+        run: |
+          set -eu
+          git fetch origin b6bce4d387433372f480593bd28de506ff0b5368 1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+
+      - name: Apply dual-session scaffold and M21 Joy-Con topology
+        run: |
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify M21 experiment source
+        run: |
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h OpenPuck/mode_switch2_pro.cpp | sort)"
+          grep -q 'F27-M21-DUAL-JCR-TOPOLOGY' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'out\[5\] \^= 0x01u' OpenPuck/mode_switch2_pro.cpp
+          grep -q "block\[serialTail - address\] = '1'" OpenPuck/mode_switch2_pro.cpp
+          grep -q 'bool requestedMouse = true' OpenPuck/f27_joycon2.cpp
+          grep -q 'if (surface)' OpenPuck/f27_joycon2.cpp
+          grep -q 'g_sw2Sessions\[s\].activeReport = 0x08' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard F27-M21 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M21-DUALJCR-${short}" ./gen_version.sh
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M21-DualJoyCon2-R-standard.uf2
+          cp build/f27-standard/OpenPuck-F27-M21-DualJoyCon2-R-standard.uf2 /tmp/
+          cp build/f27-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M21-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Recompose M21 over Makerdiary build
+        run: |
+          set -eu
+          git fetch origin b6bce4d387433372f480593bd28de506ff0b5368 1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-M21-DUAL-JCR-TOPOLOGY' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Build Makerdiary MDK F27-M21 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M21-DUALJCR-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M21-DualJoyCon2-R-MDK.uf2
+          mkdir -p build/f27-standard
+          cp /tmp/OpenPuck-F27-M21-DualJoyCon2-R-standard.uf2 build/f27-standard/
+          cp /tmp/OpenPuck-F27-M21-standard.hex build/f27-standard/OpenPuck.ino.hex
+
+      - name: Validate M21 artifact identity
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, os
+          build = ("F27-M21-DUALJCR-" + os.environ["GITHUB_SHA"][:8]).encode()
+          marker = b'F27-M21-DUAL-JCR-TOPOLOGY'
+          for path in [
+              'build/f27-standard/OpenPuck-F27-M21-DualJoyCon2-R-standard.uf2',
+              'build/mdk/OpenPuck-F27-M21-DualJoyCon2-R-MDK.uf2',
+          ]:
+              data = Path(path).read_bytes()
+              if len(data) % 512: raise SystemExit(f'non-UF2 length: {path}')
+              image=bytearray(); seen=[]; total=None; family=None; addrs=[]
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,fam=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit(f'bad UF2 magic: {path}')
+                  total=nblocks if total is None else total; family=fam if family is None else family
+                  if nblocks!=total or fam!=family: raise SystemExit(f'inconsistent UF2 metadata: {path}')
+                  seen.append(no)
+                  if addr>=0x26000:
+                      image += b[32:32+size]; addrs.append(addr)
+              if seen != list(range(total)): raise SystemExit(f'non-sequential blocks: {path}')
+              if marker not in image: raise SystemExit(f'missing M21 marker: {path}')
+              if build not in image: raise SystemExit(f'missing M21 build label: {path}')
+              print(path,'PASS','blocks',total,'family',hex(family),'range',hex(min(addrs)),hex(max(addrs)+256))
+          PY
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M21-DualJoyCon2-R.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          m20_hardware_positive=6c2e191693fec0baadeeda8938275e6d04a5463b
+          historical_m3=1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          dual_session_scaffold=b6bce4d387433372f480593bd28de506ff0b5368
+          makerdiary_authority=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          target=F27-M21-DualJoyCon2-R
+          topology=session0 Joy-Con2-R PID2066/report08 live M3 encoder; session1 Joy-Con2-R PID2066/report08 neutral
+          identity_isolation=session1 controller address differs by final-byte XOR 0x01; factory serial tail differs 0->1
+          shared_transport=one physical USB address remains 057E:2069; shared EP0 logical PID patched to 2066
+          purpose=valid Switch-2-native test of whether two independently-addressed Joy-Con2-R sessions can register behind one USB device
+          success=two Joy-Con2-R controller slots visible; session0 input/mouse remains usable
+          fail=only one slot or no usable controllers despite M20 single Joy-Con-R hardware PASS
+          EOF
+          sha256sum build/f27-standard/OpenPuck-F27-M21-DualJoyCon2-R-standard.uf2 >> build/F27-M21-DualJoyCon2-R.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-M21-DualJoyCon2-R-MDK.uf2 >> build/F27-M21-DualJoyCon2-R.manifest.txt
+
+      - name: Upload F27-M21 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M21-DualJoyCon2-R
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M21-DualJoyCon2-R-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M21-DualJoyCon2-R-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M21-DualJoyCon2-R.manifest.txt
