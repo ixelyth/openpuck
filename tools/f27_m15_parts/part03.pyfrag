@@ -1,0 +1,115 @@
+# buttons/sticks/mouse; we only want Change Grip/Order to expose a second slot.
+insert_before_drain = r'''static void sw2BuildJoyconRNeutral(uint8_t slot, uint8_t out[63])
+{
+\tmemset(out, 0, 63);
+\tout[0] = g_sw2Counter8++;
+\tout[1] = sw2PowerInfo(slot);
+\tout[4] = 0x07;
+\tsw2PackStick(out + 5, 0, 0);
+\tout[8] = 0x38;
+\tout[0x0d] = 0xff; // optical sensor off-surface
+\tout[0x0e] = 0;    // NFC idle
+\tout[0x0f] = 0;    // no motion carrier in topology-only M15
+}
+
+static void sw2Build05Neutral(uint8_t slot, uint8_t out[63])
+{
+\tmemset(out, 0, 63);
+\tuint32_t counter = g_sw2Counter32++;
+\tmemcpy(out, &counter, sizeof counter);
+\tsw2PackStick(out + 0x0a, 0, 0);
+\tsw2PackStick(out + 0x0d, 0, 0);
+\t(void)slot;
+\tout[0x1f] = 0xd8;
+\tout[0x20] = 0x0e;
+\tout[0x21] = 0x34;
+\tout[0x29] = 0x01;
+}
+
+'''
+src = replace_once(
+    src,
+    "static void sw2Drain(void)\n{",
+    insert_before_drain + "static void sw2Drain(void)\n{",
+    "neutral builders",
+)
+
+drain_pattern = r'''static void sw2Drain\(void\)\n\{.*?\n\}\n\n(?=bool switch2ProVendorControlXfer)'''
+drain_repl = r'''static void sw2Drain(void)
+{
+\tif (g_usbMode != MODE_SW2_PRO || g_usbMountCount == 0)
+\t\treturn;
+
+\tint bond = g_usbToBond[0];
+\tif (bond < 0 || bond >= NSLOT)
+\t\treturn;
+
+\tfor (uint8_t s = 0; s < M15_SW2_SESSION_COUNT; s++) {
+\t\tg_sw2SessionCtx = s;
+\t\tif (g_sw2VendorCommandPending && !g_sw2VendorInFlight) {
+\t\t\tsw2BuildVendorReply();
+\t\t\tuint8_t n = g_sw2VendorReplyLen;
+\t\t\tuint8_t first = n > sizeof g_sw2VendorReply ?
+\t\t\t\t\tsizeof g_sw2VendorReply :
+\t\t\t\t\tn;
+\t\t\tif (first && g_sw2VendorEpIn &&
+\t\t\t    usbd_edpt_xfer(g_sw2Rhport, g_sw2VendorEpIn,
+\t\t\t\t\t   g_sw2VendorReply, first))
+\t\t\t\tg_sw2VendorInFlight = true;
+\t\t}
+
+\t\tif (!g_sw2InputEnabled || !tud_hid_n_ready(s))
+\t\t\tcontinue;
+\t\tif ((uint32_t)(millis() - g_sw2LastReportMs) < USB_STREAM_MS)
+\t\t\tcontinue;
+
+\t\tuint8_t p[63];
+\t\tuint8_t rid = g_sw2ActiveReport;
+\t\tif (s == M15_SW2_JOYCON_R) {
+\t\t\tif (rid == 0x05)
+\t\t\t\tsw2Build05Neutral((uint8_t)bond, p);
+\t\t\telse {
+\t\t\t\trid = 0x08;
+\t\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);
+\t\t\t}
+\t\t} else if (rid == 0x05) {
+\t\t\tsw2Build05((uint8_t)bond, p);
+\t\t} else {
+\t\t\trid = 0x09;
+\t\t\tsw2Build09((uint8_t)bond, p);
+\t\t}
+\t\tif (tud_hid_n_report(s, rid, p, sizeof p))
+\t\t\tg_sw2LastReportMs = millis();
+\t}
+\tg_sw2SessionCtx = M15_SW2_PRO;
+}
+
+'''
+src = regex_once(src, drain_pattern, drain_repl, "dual drain")
+
+# Replace class-driver lifecycle/open/control/xfer with session-aware routing.
+driver_lifecycle_pattern = r'''static void sw2DriverInit\(void\)\n\{.*?\n\}\n\nstatic const usbd_class_driver_t g_sw2Driver = \{'''
+driver_lifecycle_repl = r'''static void sw2DriverInit(void)
+{
+\tfor (uint8_t s = 0; s < M15_SW2_SESSION_COUNT; s++) {
+\t\tg_sw2Sessions[s].vendorEpOut = 0;
+\t\tg_sw2Sessions[s].vendorEpIn = 0;
+\t}
+}
+static bool sw2DriverDeinit(void)
+{
+\treturn true;
+}
+static void sw2DriverReset(uint8_t rhport)
+{
+\t(void)rhport;
+\tfor (uint8_t s = 0; s < M15_SW2_SESSION_COUNT; s++) {
+\t\tg_sw2SessionCtx = s;
+\t\tg_sw2VendorEpOut = g_sw2VendorEpIn = 0;
+\t\tg_sw2VendorCommandPending = false;
+\t\tg_sw2VendorInFlight = false;
+\t\tg_sw2VendorCommandLen = 0;
+\t\tg_sw2VendorReplyLen = 0;
+\t\tg_sw2InputEnabled = false;
+\t\tg_sw2ActiveReport = sw2JoyconR() ? 0x08 : 0x09;
+\t\tg_sw2Features = 0;

@@ -1,0 +1,115 @@
+				// Audio Control header baInterfaceNr[] references the two
+				// streaming interfaces and must move with the second function.
+				buf[off + 8u] = (uint8_t)(buf[off + 8u] + first);
+				buf[off + 9u] = (uint8_t)(buf[off + 9u] + first);
+			}
+			off = (uint16_t)(off + len);
+		}
+		g_sw2Sessions[_session].baseInterface = first;
+		g_sw2Sessions[_session].hidInstance = _session;
+		return sizeof SWITCH2_PRO_CFG_BODY;
+	}
+
+    private:
+	uint8_t _session;
+};
+static Switch2ProUsbInterface g_sw2Usb[M15_SW2_SESSION_COUNT] = {
+	Switch2ProUsbInterface(M15_SW2_PRO),
+	Switch2ProUsbInterface(M15_SW2_JOYCON_R),
+};'''
+src = regex_once(src, interface_pattern, interface_repl, "dual interface class")
+
+# Session 1 presents logical Joy-Con 2 R PID 0x2066 through the per-function
+# factory/SPI transport. EP0 remains the physical 057E:2069 device identity.
+src = replace_once(
+    src,
+    "\tsw2OverlayFlash(address, block, len, 0x00013100, SW2_FACTORY_13100,\n"
+    "\t\t\tsizeof SW2_FACTORY_13100);\n}",
+    "\tsw2OverlayFlash(address, block, len, 0x00013100, SW2_FACTORY_13100,\n"
+    "\t\t\tsizeof SW2_FACTORY_13100);\n"
+    "\tif (sw2JoyconR()) {\n"
+    "\t\tconst uint32_t pid = 0x00013014u;\n"
+    "\t\tif (address <= pid && pid < address + len)\n"
+    "\t\t\tblock[pid - address] = 0x66;\n"
+    "\t\tif (address <= pid + 1u && pid + 1u < address + len)\n"
+    "\t\t\tblock[pid + 1u - address] = 0x20;\n"
+    "\t}\n}",
+    "Joy-Con factory PID",
+)
+
+feature_info_pattern = r'''static void sw2FeatureInfo\(uint8_t flags, uint8_t out\[8\]\)\n\{.*?\n\}\n\n(?=static uint8_t sw2HandleUsbCommand)'''
+feature_info_repl = r'''static void sw2FeatureInfo(uint8_t flags, uint8_t out[8])
+{
+\tmemset(out, 0, 8);
+\tif (flags & 0x01)
+\t\tout[0] = 0x07;
+\tif (flags & 0x02)
+\t\tout[1] = 0x07;
+\tif (flags & 0x04)
+\t\tout[2] = sw2JoyconR() ? 0x03 : 0x01;
+\tif (flags & 0x80)
+\t\tout[3] = sw2JoyconR() ? 0x03 : 0x01;
+\tif (flags & 0x10)
+\t\tout[4] = sw2JoyconR() ? 0x03 : 0x01;
+\tif (flags & 0x20)
+\t\tout[5] = 0x03;
+}
+
+'''
+src = regex_once(src, feature_info_pattern, feature_info_repl, "feature info")
+
+src = replace_once(
+    src,
+    "\tif (sub == 0x0a && n >= 9 && (cmd[8] == 0x05 || cmd[8] == 0x09))\n"
+    "\t\tg_sw2ActiveReport = cmd[8];",
+    "\tif (sub == 0x0a && n >= 9) {\n"
+    "\t\tif (sw2JoyconR()) {\n"
+    "\t\t\tif (cmd[8] == 0x05)\n"
+    "\t\t\t\tg_sw2ActiveReport = 0x05;\n"
+    "\t\t\telse if (cmd[8] == 0x08 || cmd[8] == 0x09)\n"
+    "\t\t\t\tg_sw2ActiveReport = 0x08;\n"
+    "\t\t} else if (cmd[8] == 0x05 || cmd[8] == 0x09) {\n"
+    "\t\t\tg_sw2ActiveReport = cmd[8];\n"
+    "\t\t}\n"
+    "\t}",
+    "report selection",
+)
+
+feature_handler_pattern = r'''static uint8_t sw2HandleFeatures\(const uint8_t \*cmd, uint8_t n, uint8_t \*reply\)\n\{.*?\n\}\n\n(?=static void sw2BuildVendorReply)'''
+feature_handler_repl = r'''static uint8_t sw2HandleFeatures(const uint8_t *cmd, uint8_t n, uint8_t *reply)
+{
+\tuint8_t sub = cmd[3], flags = n >= 9 ? cmd[8] : 0;
+\tsw2DataHeader(reply, 0x0c, cmd[2], sub);
+\tif (sub == 0x01) {
+\t\tsw2FeatureInfo(flags, reply + 12);
+\t\treturn 20;
+\t}
+\tif (sw2JoyconR() && sub == 0x06) {
+\t\t// Captured Joy-Con 2 Configure Features response shape.
+\t\tmemset(reply + 8, 0, 40);
+\t\tif (n > 12)
+\t\t\treply[12] = cmd[12];
+\t\treturn 48;
+\t}
+\tif (sub == 0x02)
+\t\tg_sw2FeatureMask = flags;
+\telse if (sub == 0x03) {
+\t\tif (sw2JoyconR()) {
+\t\t\tg_sw2FeatureMask &= (uint8_t)~flags;
+\t\t\tg_sw2Features &= (uint8_t)~flags;
+\t\t} else {
+\t\t\tg_sw2FeatureMask = 0;
+\t\t\tg_sw2Features = 0;
+\t\t}
+\t} else if (sub == 0x04) {
+\t\tg_sw2Features |= flags & g_sw2FeatureMask;
+\t} else if (sub == 0x05) {
+\t\tg_sw2Features &= (uint8_t)~flags;
+\t}
+\treturn 12;
+}
+
+'''
+src = regex_once(src, feature_handler_pattern, feature_handler_repl, "feature handler")
+
+# Topology-only neutral Joy-Con stream. It intentionally carries no Steam

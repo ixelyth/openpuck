@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Apply F27-M15 dual Switch 2 controller-session topology probe.
+
+Runtime base: switch2pro-reconcile-main @ 1b4c0fae82489ab6034004c69ed6c8979268eb03.
+
+M15 keeps the existing Switch 2 Pro session as session 0 and adds a second,
+otherwise-neutral Joy-Con 2 R logical session behind the same USB device.  The
+purpose is topology-only: determine whether Switch 2 will register two distinct
+Nintendo controller sessions from one OpenPuck USB address.  Mouse routing is
+intentionally absent.
+"""
+from pathlib import Path
+import re
+
+MODE = Path("OpenPuck/mode_switch2_pro.cpp")
+INO = Path("OpenPuck/OpenPuck.ino")
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"M15 {label}: anchor count {count}, expected 1")
+    return text.replace(old, new, 1)
+
+
+def regex_once(text: str, pattern: str, repl: str, label: str) -> str:
+    out, count = re.subn(pattern, repl, text, count=1, flags=re.S)
+    if count != 1:
+        raise SystemExit(f"M15 {label}: regex count {count}, expected 1")
+    return out
+
+
+# Two full S2 descriptor bodies are 2*259 B plus the configuration header.
+ino = INO.read_text(encoding="utf-8")
+ino = replace_once(
+    ino,
+    "static uint8_t g_usbCfgDesc[512];",
+    "// F27-M15 topology probe: two full Switch 2 controller functions require\n"
+    "// 9 + 2*259 bytes before TinyUSB's configuration bookkeeping.\n"
+    "static uint8_t g_usbCfgDesc[768];",
+    "configuration buffer",
+)
+INO.write_text(ino, encoding="utf-8")
+
+src = MODE.read_text(encoding="utf-8")
+
+# Embed an immutable marker so the accepted UF2 can be distinguished from the
+# reconciliation baseline and from M14 without relying only on filenames.
+src = replace_once(
+    src,
+    "Switch2ProController g_switch2Pro;\n",
+    "Switch2ProController g_switch2Pro;\n\n"
+    "static const char M15_BUILD_MARKER[] __attribute__((used)) =\n"
+    "\t\"F27-M15-DUAL-S2-TOPOLOGY\";\n",
+    "build marker",
+)
+
+old_state = r'''static volatile uint8_t g_sw2ActiveReport = 0x09;\nstatic volatile uint8_t g_sw2Features = 0;\nstatic volatile uint8_t g_sw2FeatureMask = 0;\nstatic volatile bool g_sw2InputEnabled = false;\nstatic volatile uint8_t g_sw2Counter8 = 0;\nstatic volatile uint32_t g_sw2Counter32 = 0;\nstatic int8_t g_sw2LastRumbleBond = -1;\nstatic uint16_t g_sw2LastRumbleLeft = 0;\nstatic uint16_t g_sw2LastRumbleRight = 0;'''
+new_state = r'''enum : uint8_t {
+\tM15_SW2_PRO = 0,
+\tM15_SW2_JOYCON_R = 1,
+\tM15_SW2_SESSION_COUNT = 2,
+};
+
+struct M15Sw2Session {
+\tvolatile uint8_t activeReport;
+\tvolatile uint8_t features;
+\tvolatile uint8_t featureMask;
+\tvolatile bool inputEnabled;
+\tvolatile uint8_t counter8;
+\tvolatile uint32_t counter32;
+\tint8_t lastRumbleBond;
+\tuint16_t lastRumbleLeft;
+\tuint16_t lastRumbleRight;
+\tvolatile bool vendorCommandPending;
+\tvolatile bool vendorInFlight;
+\tvolatile uint8_t vendorCommandLen;
+\tvolatile uint8_t vendorReplyLen;
+\tuint8_t vendorOut[64];
+\tuint8_t vendorReply[64];
+\tvolatile uint8_t vendorEpOut;
+\tvolatile uint8_t vendorEpIn;
+\tunsigned long lastReportMs;
+\tuint8_t pairLtk[16];
+\tbool pairLtkValid;
+\tuint8_t baseInterface;
+\tuint8_t hidInstance;
+};
+
+static M15Sw2Session g_sw2Sessions[M15_SW2_SESSION_COUNT];
+static uint8_t g_sw2SessionCtx = M15_SW2_PRO;
+
+static inline M15Sw2Session &sw2Session()
+{
+\treturn g_sw2Sessions[g_sw2SessionCtx];
+}
+static inline bool sw2JoyconR()
+{
+\treturn g_sw2SessionCtx == M15_SW2_JOYCON_R;
+}
+
+#define g_sw2ActiveReport (sw2Session().activeReport)
+#define g_sw2Features (sw2Session().features)
+#define g_sw2FeatureMask (sw2Session().featureMask)
+#define g_sw2InputEnabled (sw2Session().inputEnabled)
+#define g_sw2Counter8 (sw2Session().counter8)
+#define g_sw2Counter32 (sw2Session().counter32)
+#define g_sw2LastRumbleBond (sw2Session().lastRumbleBond)
+#define g_sw2LastRumbleLeft (sw2Session().lastRumbleLeft)
+#define g_sw2LastRumbleRight (sw2Session().lastRumbleRight)
+#define g_sw2VendorCommandPending (sw2Session().vendorCommandPending)
+#define g_sw2VendorInFlight (sw2Session().vendorInFlight)
+#define g_sw2VendorCommandLen (sw2Session().vendorCommandLen)
+#define g_sw2VendorReplyLen (sw2Session().vendorReplyLen)
+#define g_sw2VendorOut (sw2Session().vendorOut)

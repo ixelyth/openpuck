@@ -1,0 +1,115 @@
+#define g_sw2VendorReply (sw2Session().vendorReply)
+#define g_sw2VendorEpOut (sw2Session().vendorEpOut)
+#define g_sw2VendorEpIn (sw2Session().vendorEpIn)
+#define g_sw2LastReportMs (sw2Session().lastReportMs)
+#define g_sw2PairLtk (sw2Session().pairLtk)
+#define g_sw2PairLtkValid (sw2Session().pairLtkValid)'''
+src = regex_once(src, old_state, new_state, "session state")
+
+src = replace_once(
+    src,
+    "static volatile bool g_sw2VendorCommandPending = false;\n"
+    "static volatile bool g_sw2VendorInFlight = false;\n"
+    "static volatile uint8_t g_sw2VendorCommandLen = 0;\n"
+    "static volatile uint8_t g_sw2VendorReplyLen = 0;\n"
+    "static uint8_t g_sw2VendorOut[64];\n"
+    "static uint8_t g_sw2VendorReply[64];\n"
+    "static uint8_t g_sw2ControlReply[64];",
+    "static uint8_t g_sw2ControlReply[64];",
+    "vendor globals",
+)
+
+src = replace_once(
+    src,
+    "static volatile uint8_t g_sw2VendorEpOut = 0;\n"
+    "static volatile uint8_t g_sw2VendorEpIn = 0;\n"
+    "static volatile uint8_t g_sw2Rhport = 0;\n"
+    "static unsigned long g_sw2LastReportMs = 0;\n"
+    "static bool g_sw2DrainRegistered = false;",
+    "static volatile uint8_t g_sw2Rhport = 0;\n"
+    "static bool g_sw2DrainRegistered = false;",
+    "endpoint globals",
+)
+
+src = replace_once(
+    src,
+    "static uint8_t g_sw2PairLtk[16];\nstatic bool g_sw2PairLtkValid = false;\n",
+    "",
+    "pair globals",
+)
+
+# Duplicate the captured five-interface body. Session 0 remains byte-for-byte
+# equivalent to the existing controller. Session 1 gets IF5..9 and EP4..6.
+interface_pattern = r'''class Switch2ProUsbInterface : public Adafruit_USBD_Interface \{.*?\n\};\nstatic Switch2ProUsbInterface g_sw2Usb;'''
+interface_repl = r'''class Switch2ProUsbInterface : public Adafruit_USBD_Interface {
+    public:
+\texplicit Switch2ProUsbInterface(uint8_t session) : _session(session) {}
+
+\tuint16_t getInterfaceDescriptor(uint8_t, uint8_t *buf,
+\t\t\t\t\tuint16_t bufsize) override
+\t{
+\t\tif (!buf)
+\t\t\treturn sizeof SWITCH2_PRO_CFG_BODY;
+\t\tif (bufsize < sizeof SWITCH2_PRO_CFG_BODY ||
+\t\t    _session >= M15_SW2_SESSION_COUNT)
+\t\t\treturn 0;
+
+\t\tuint8_t first = TinyUSBDevice.allocInterface(5);
+\t\tuint8_t hidIn = TinyUSBDevice.allocEndpoint(TUSB_DIR_IN);
+\t\tuint8_t hidOut = TinyUSBDevice.allocEndpoint(TUSB_DIR_OUT);
+\t\tuint8_t vendorOut = TinyUSBDevice.allocEndpoint(TUSB_DIR_OUT);
+\t\tuint8_t vendorIn = TinyUSBDevice.allocEndpoint(TUSB_DIR_IN);
+\t\tuint8_t audioOut = TinyUSBDevice.allocEndpoint(TUSB_DIR_OUT);
+\t\tuint8_t audioIn = TinyUSBDevice.allocEndpoint(TUSB_DIR_IN);
+\t\tuint8_t epBase = (uint8_t)(1u + 3u * _session);
+\t\tif (first != (uint8_t)(5u * _session) ||
+\t\t    hidIn != (uint8_t)(0x80u | epBase) || hidOut != epBase ||
+\t\t    vendorOut != (uint8_t)(epBase + 1u) ||
+\t\t    vendorIn != (uint8_t)(0x80u | (epBase + 1u)) ||
+\t\t    audioOut != (uint8_t)(epBase + 2u) ||
+\t\t    audioIn != (uint8_t)(0x80u | (epBase + 2u)))
+\t\t\treturn 0;
+
+\t\tuint8_t hidStr, vendorStr;
+\t\tif (_session == M15_SW2_PRO) {
+\t\t\tuint8_t configStr =
+\t\t\t\tTinyUSBDevice.addStringDescriptor("Config_0");
+\t\t\thidStr = TinyUSBDevice.addStringDescriptor("If_Hid");
+\t\t\tvendorStr = TinyUSBDevice.addStringDescriptor(
+\t\t\t\t"Switch 2 Pro Controller");
+\t\t\tif (configStr != 4 || hidStr != 5 || vendorStr != 6)
+\t\t\t\treturn 0;
+\t\t} else {
+\t\t\thidStr = TinyUSBDevice.addStringDescriptor("If_Hid_JCR");
+\t\t\tvendorStr = TinyUSBDevice.addStringDescriptor("Joy-Con 2 (R)");
+\t\t}
+
+\t\tmemcpy(buf, SWITCH2_PRO_CFG_BODY, sizeof SWITCH2_PRO_CFG_BODY);
+\t\tfor (uint16_t off = 0; off < sizeof SWITCH2_PRO_CFG_BODY;) {
+\t\t\tuint8_t len = buf[off];
+\t\t\tuint8_t type = off + 1u < sizeof SWITCH2_PRO_CFG_BODY ?
+\t\t\t\t\t       buf[off + 1u] :
+\t\t\t\t\t       0;
+\t\t\tif (!len || off + len > sizeof SWITCH2_PRO_CFG_BODY)
+\t\t\t\treturn 0;
+\t\t\tif (type == TUSB_DESC_INTERFACE_ASSOCIATION) {
+\t\t\t\tbuf[off + 2u] = (uint8_t)(buf[off + 2u] + first);
+\t\t\t} else if (type == TUSB_DESC_INTERFACE) {
+\t\t\t\tuint8_t local = buf[off + 2u];
+\t\t\t\tbuf[off + 2u] = (uint8_t)(local + first);
+\t\t\t\tif (local == 0)
+\t\t\t\t\tbuf[off + 8u] = hidStr;
+\t\t\t\telse if (local == 1)
+\t\t\t\t\tbuf[off + 8u] = vendorStr;
+\t\t\t} else if (type == TUSB_DESC_ENDPOINT) {
+\t\t\t\tuint8_t original = buf[off + 2u];
+\t\t\t\tuint8_t number = original & 0x0fu;
+\t\t\t\tbool in = (original & 0x80u) != 0;
+\t\t\t\tif (number == 1)
+\t\t\t\t\tbuf[off + 2u] = in ? hidIn : hidOut;
+\t\t\t\telse if (number == 2)
+\t\t\t\t\tbuf[off + 2u] = in ? vendorIn : vendorOut;
+\t\t\t\telse if (number == 3)
+\t\t\t\t\tbuf[off + 2u] = in ? audioIn : audioOut;
+\t\t\t} else if (type == 0x24 && len == 10 &&
+\t\t\t\t   buf[off + 2u] == 0x01 && buf[off + 7u] == 0x02) {

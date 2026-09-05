@@ -1,0 +1,115 @@
+		g_sw2FeatureMask = sw2JoyconR() ? 0x37 : 0;
+		g_sw2Counter8 = 0;
+		g_sw2Counter32 = 0;
+		g_sw2LastReportMs = 0;
+		g_sw2PairLtkValid = false;
+		g_sw2LastRumbleBond = -1;
+		g_sw2LastRumbleLeft = 0;
+		g_sw2LastRumbleRight = 0;
+	}
+	g_sw2SessionCtx = M15_SW2_PRO;
+}
+
+static uint16_t sw2DriverOpen(uint8_t rhport, tusb_desc_interface_t const *itf,
+			      uint16_t maxLen)
+{
+	if (g_usbMode != MODE_SW2_PRO)
+		return 0;
+	g_sw2Rhport = rhport;
+	uint8_t ifnum = itf->bInterfaceNumber;
+	uint8_t s = (uint8_t)(ifnum / 5u);
+	uint8_t local = (uint8_t)(ifnum % 5u);
+	if (s >= M15_SW2_SESSION_COUNT)
+		return 0;
+	g_sw2SessionCtx = s;
+	if (local == 0 && itf->bInterfaceClass == TUSB_CLASS_HID)
+		return hidd_open(rhport, itf, maxLen);
+
+	if (local == 1 && itf->bInterfaceClass == 0xff) {
+		uint8_t const *p = (uint8_t const *)itf;
+		uint8_t const *end = p + maxLen;
+		uint16_t used = 0;
+		uint8_t opened = 0;
+		while (p < end) {
+			uint8_t len = p[0], type = p[1];
+			if (!len)
+				return 0;
+			if (p != (uint8_t const *)itf &&
+			    (type == TUSB_DESC_INTERFACE ||
+			     type == TUSB_DESC_INTERFACE_ASSOCIATION))
+				break;
+			if (type == TUSB_DESC_ENDPOINT) {
+				auto ep = (tusb_desc_endpoint_t const *)p;
+				if (!usbd_edpt_open(rhport, ep))
+					return 0;
+				if (tu_edpt_dir(ep->bEndpointAddress) == TUSB_DIR_IN)
+					g_sw2VendorEpIn = ep->bEndpointAddress;
+				else
+					g_sw2VendorEpOut = ep->bEndpointAddress;
+				opened++;
+			}
+			used += len;
+			p += len;
+		}
+		if (opened != 2 || !g_sw2VendorEpOut || !g_sw2VendorEpIn)
+			return 0;
+		if (!usbd_edpt_xfer(rhport, g_sw2VendorEpOut, g_sw2VendorOut,
+				    sizeof g_sw2VendorOut))
+			return 0;
+		return used;
+	}
+
+	if (local == 2 && itf->bInterfaceClass == TUSB_CLASS_AUDIO)
+		return maxLen;
+	return 0;
+}
+
+static bool sw2DriverControl(uint8_t rhport, uint8_t stage,
+			     tusb_control_request_t const *req)
+{
+	if (g_usbMode != MODE_SW2_PRO)
+		return false;
+	if (req->wIndex == g_sw2Sessions[M15_SW2_PRO].baseInterface ||
+	    req->wIndex == g_sw2Sessions[M15_SW2_JOYCON_R].baseInterface)
+		return hidd_control_xfer_cb(rhport, stage, req);
+	return stage != CONTROL_STAGE_SETUP;
+}
+
+static bool sw2DriverXfer(uint8_t rhport, uint8_t ep, xfer_result_t result,
+			  uint32_t transferred)
+{
+	for (uint8_t s = 0; s < M15_SW2_SESSION_COUNT; s++) {
+		g_sw2SessionCtx = s;
+		if (ep == g_sw2VendorEpOut) {
+			if (result == XFER_RESULT_SUCCESS) {
+				g_sw2VendorCommandLen =
+					(uint8_t)(transferred > 64 ? 64 : transferred);
+				g_sw2VendorCommandPending = true;
+			}
+			return true;
+		}
+		if (ep == g_sw2VendorEpIn) {
+			if (result == XFER_RESULT_SUCCESS && g_sw2VendorReplyLen > 64) {
+				uint8_t tail = g_sw2VendorReplyLen - 64;
+				g_sw2VendorReplyLen = tail;
+				return usbd_edpt_xfer(rhport, g_sw2VendorEpIn,
+						      g_sw2VendorOut, tail);
+			}
+			g_sw2VendorReplyLen = 0;
+			g_sw2VendorInFlight = false;
+			return usbd_edpt_xfer(rhport, g_sw2VendorEpOut, g_sw2VendorOut,
+					      sizeof g_sw2VendorOut);
+		}
+	}
+	g_sw2SessionCtx = M15_SW2_PRO;
+	return hidd_xfer_cb(rhport, ep, result, transferred);
+}
+
+static const usbd_class_driver_t g_sw2Driver = {'''
+src = regex_once(src, driver_lifecycle_pattern, driver_lifecycle_repl, "class driver")
+
+# Both HID instances use the same captured Pro report descriptor. F27 already
+# proved the Switch accepts logical report 0x08 over this descriptor shape.
+src = replace_once(
+    src,
+    "\tif (g_usbMode == MODE_SW2_PRO && itf == 0)\n"

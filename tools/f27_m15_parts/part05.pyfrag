@@ -1,0 +1,112 @@
+    "\t\treturn SWITCH2_PRO_HID_DESC;",
+    "\tif (g_usbMode == MODE_SW2_PRO && itf < M15_SW2_SESSION_COUNT)\n"
+    "\t\treturn SWITCH2_PRO_HID_DESC;",
+    "report descriptor routing",
+)
+
+get_report_pattern = r'''extern "C" uint16_t __wrap_tud_hid_get_report_cb\(uint8_t itf, uint8_t reportId,.*?\n\}\n\n(?=// Switch 2 Pro output report 0x02)'''
+get_report_repl = r'''extern "C" uint16_t __wrap_tud_hid_get_report_cb(uint8_t itf, uint8_t reportId,
+\t\t\t\t\t\t hid_report_type_t reportType,
+\t\t\t\t\t\t uint8_t *buffer,
+\t\t\t\t\t\t uint16_t reqLen)
+{
+\tif (g_usbMode != MODE_SW2_PRO || itf >= M15_SW2_SESSION_COUNT)
+\t\treturn __real_tud_hid_get_report_cb(itf, reportId, reportType,
+\t\t\t\t\t\t    buffer, reqLen);
+\t(void)reportType;
+\tif (!buffer || !reqLen)
+\t\treturn 0;
+\tg_sw2SessionCtx = itf;
+\tuint8_t p[63];
+\tint bond = g_usbMountCount ? g_usbToBond[0] : -1;
+\tif (bond < 0) {
+\t\tmemset(p, 0, sizeof p);
+\t} else if (itf == M15_SW2_JOYCON_R) {
+\t\tif (reportId == 0x05)
+\t\t\tsw2Build05Neutral((uint8_t)bond, p);
+\t\telse if (reportId == 0x08 || reportId == 0x09)
+\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);
+\t\telse
+\t\t\treturn 0;
+\t} else if (reportId == 0x05) {
+\t\tsw2Build05((uint8_t)bond, p);
+\t} else if (reportId == 0x09) {
+\t\tsw2Build09((uint8_t)bond, p);
+\t} else {
+\t\treturn 0;
+\t}
+\tuint16_t n = reqLen < sizeof p ? reqLen : sizeof p;
+\tmemcpy(buffer, p, n);
+\tg_sw2SessionCtx = M15_SW2_PRO;
+\treturn n;
+}
+
+'''
+src = regex_once(src, get_report_pattern, get_report_repl, "get-report routing")
+
+set_report_pattern = r'''extern "C" void __wrap_tud_hid_set_report_cb\(uint8_t itf, uint8_t reportId,.*?\n\}\n\n(?=void Switch2ProController::begin\(\))'''
+set_report_repl = r'''extern "C" void __wrap_tud_hid_set_report_cb(uint8_t itf, uint8_t reportId,
+\t\t\t\t\t     hid_report_type_t reportType,
+\t\t\t\t\t     uint8_t const *buffer,
+\t\t\t\t\t     uint16_t size)
+{
+\tif (g_usbMode == MODE_SW2_PRO && itf < M15_SW2_SESSION_COUNT) {
+\t\t// Session 1 is a topology-only Joy-Con companion. Ignore its rumble
+\t\t// so the physical Steam Controller is driven only by the Pro session.
+\t\tif (itf == M15_SW2_PRO && reportType == HID_REPORT_TYPE_OUTPUT) {
+\t\t\tg_sw2SessionCtx = M15_SW2_PRO;
+\t\t\tif (reportId == 0x02) {
+\t\t\t\tsw2Rumble(buffer, size);
+\t\t\t} else if (reportId == 0 && size > 0 && buffer[0] == 0x02) {
+\t\t\t\tsw2Rumble(buffer + 1, (uint16_t)(size - 1));
+\t\t\t}
+\t\t}
+\t\treturn;
+\t}
+\t__real_tud_hid_set_report_cb(itf, reportId, reportType, buffer, size);
+}
+
+'''
+src = regex_once(src, set_report_pattern, set_report_repl, "set-report routing")
+
+src = replace_once(
+    src,
+    "uint8_t Switch2ProController::maxSlots() const\n{\n\treturn 1;\n}",
+    "uint8_t Switch2ProController::maxSlots() const\n{\n"
+    "\t// M15 uses one physical Steam bond and exposes a second Nintendo\n"
+    "\t// controller function as its neutral Joy-Con-R companion.\n"
+    "\treturn 1;\n}",
+    "max slots note",
+)
+
+src = replace_once(
+    src,
+    "void Switch2ProController::beginPool()\n{\n"
+    "\tif (!g_sw2DrainRegistered) {",
+    "void Switch2ProController::beginPool()\n{\n"
+    "\tfor (uint8_t s = 0; s < M15_SW2_SESSION_COUNT; s++) {\n"
+    "\t\tg_sw2Sessions[s].activeReport =\n"
+    "\t\t\ts == M15_SW2_JOYCON_R ? 0x08 : 0x09;\n"
+    "\t\tg_sw2Sessions[s].featureMask =\n"
+    "\t\t\ts == M15_SW2_JOYCON_R ? 0x37 : 0;\n"
+    "\t\tg_sw2Sessions[s].lastRumbleBond = -1;\n"
+    "\t}\n"
+    "\tif (!g_sw2DrainRegistered) {",
+    "beginPool defaults",
+)
+
+src = replace_once(
+    src,
+    "void Switch2ProController::mountSlots(uint8_t k)\n{\n"
+    "\tif (k)\n"
+    "\t\tUSBDevice.addInterface(g_sw2Usb);\n}",
+    "void Switch2ProController::mountSlots(uint8_t k)\n{\n"
+    "\tif (!k)\n"
+    "\t\treturn;\n"
+    "\tUSBDevice.addInterface(g_sw2Usb[M15_SW2_PRO]);\n"
+    "\tUSBDevice.addInterface(g_sw2Usb[M15_SW2_JOYCON_R]);\n}",
+    "mount two sessions",
+)
+
+MODE.write_text(src, encoding="utf-8")
+print("F27-M15 dual Switch2Pro/Joy-Con-R topology probe applied")
