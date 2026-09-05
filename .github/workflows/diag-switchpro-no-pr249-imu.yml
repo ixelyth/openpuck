@@ -87,15 +87,26 @@ jobs:
           test -z "$(git diff --name-only --diff-filter=U)"
           git diff --check
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --name-only | sort > /tmp/mdk-composition-files.txt
 
       - name: Reapply isolated diagnostic over MDK composition
         run: |
+          set -eu
           python3 tools/diag_switchpro_no_pr249_imu.py
           grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
-          test "$(git diff --name-only | sort)" = "$(printf '%s\n' Makefile OpenPuck/haptics.cpp OpenPuck/OpenPuck.ino OpenPuck/fault_diag.cpp | sort)" || true
           grep -q 'if (g_usbMode == MODE_SW2_PRO)' OpenPuck/haptics.cpp
           ! grep -q 'if (g_usbMode == MODE_SW_PRO || g_usbMode == MODE_SW2_PRO)' OpenPuck/haptics.cpp
           git diff --check
+          git diff --name-only | sort > /tmp/mdk-with-diagnostic-files.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          before = set(Path('/tmp/mdk-composition-files.txt').read_text().splitlines())
+          after = set(Path('/tmp/mdk-with-diagnostic-files.txt').read_text().splitlines())
+          expected = before | {'OpenPuck/haptics.cpp'}
+          if after != expected:
+              raise SystemExit(f'unexpected MDK+diagnostic delta: before={sorted(before)} after={sorted(after)}')
+          print('MDK composition + isolated haptics delta PASS')
+          PY
 
       - name: Build Makerdiary MDK diagnostic target
         run: |
