@@ -1,0 +1,289 @@
+name: F27-M25 dual Joy-Con 2 R identity-only role-swap probe
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m25-identity-swap-jcr
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M25
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Recover pinned topology and Joy-Con helpers
+        run: |
+          set -eu
+          git fetch origin \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250 \
+            2f990e0f3e9401a734427e23e8223f2b9f1be799 \
+            5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 2f990e0f3e9401a734427e23e8223f2b9f1be799:tools/f27_switch2pro_m21.py > tools/f27_switch2pro_m21.py
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+
+      - name: Apply M21 and M22 baseline
+        run: |
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Freeze formatted M22 runtime witness
+        run: |
+          set -eu
+          make format
+          cp OpenPuck/OpenPuck.ino /tmp/m22-OpenPuck.ino
+          cp OpenPuck/f27_joycon2.cpp /tmp/m22-f27_joycon2.cpp
+          cp OpenPuck/f27_joycon2.h /tmp/m22-f27_joycon2.h
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/m22-mode_switch2_pro.cpp
+
+      - name: Apply M25 identity-only swap
+        run: python3 tools/f27_switch2pro_m25.py
+
+      - name: Format and verify M25 source
+        run: |
+          set -eu
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h OpenPuck/mode_switch2_pro.cpp | sort)"
+          grep -q 'F27-M22-HIDDEN-JCR-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-M25-IDENTITY-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M24-ROLE-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 's != M15_SW2_JOYCON_R' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm22BuildHiddenLeftMouse' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'TB_LPADT' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'bool requestedMouse = true' OpenPuck/f27_joycon2.cpp
+          grep -q 'if (surface)' OpenPuck/f27_joycon2.cpp
+          cmp /tmp/m22-OpenPuck.ino OpenPuck/OpenPuck.ino
+          cmp /tmp/m22-f27_joycon2.cpp OpenPuck/f27_joycon2.cpp
+          cmp /tmp/m22-f27_joycon2.h OpenPuck/f27_joycon2.h
+          python3 - <<'PY'
+          from pathlib import Path
+          before = Path('/tmp/m22-mode_switch2_pro.cpp').read_text()
+          after = Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          expected = before
+
+          def repl(old, new, label):
+              global expected
+              n = expected.count(old)
+              if n != 1:
+                  raise SystemExit(f'M25 independent {label} witness count {n}, expected 1')
+              expected = expected.replace(old, new, 1)
+
+          repl(
+              'static const char M22_BUILD_MARKER[] __attribute__((used)) =\n'
+              '\t"F27-M22-HIDDEN-JCR-LEFT-MOUSE";\n',
+              'static const char M22_BUILD_MARKER[] __attribute__((used)) =\n'
+              '\t"F27-M22-HIDDEN-JCR-LEFT-MOUSE";\n'
+              'static const char M25_BUILD_MARKER[] __attribute__((used)) =\n'
+              '\t"F27-M25-IDENTITY-SWAP-JCR";\n',
+              'marker',
+          )
+          repl(
+              '\tif (g_sw2SessionCtx == M15_SW2_JOYCON_R)\n\t\tout[5] ^= 0x01u;',
+              '\tif (g_sw2SessionCtx == M15_SW2_PRO)\n\t\tout[5] ^= 0x01u;',
+              'address',
+          )
+          repl(
+              "\tif (g_sw2SessionCtx == M15_SW2_JOYCON_R) {\n"
+              "\t\tconst uint32_t serialTail = 0x0001300fu;\n"
+              "\t\tif (address <= serialTail && serialTail < address + len)\n"
+              "\t\t\tblock[serialTail - address] = '1';\n"
+              "\t}",
+              "\tif (g_sw2SessionCtx == M15_SW2_PRO) {\n"
+              "\t\tconst uint32_t serialTail = 0x0001300fu;\n"
+              "\t\tif (address <= serialTail && serialTail < address + len)\n"
+              "\t\t\tblock[serialTail - address] = '1';\n"
+              "\t}",
+              'serial',
+          )
+          repl(
+              '\tasm volatile("" : : "r"(M22_BUILD_MARKER) : "memory");\n',
+              '\tasm volatile("" : : "r"(M22_BUILD_MARKER) : "memory");\n'
+              '\tasm volatile("" : : "r"(M25_BUILD_MARKER) : "memory");\n',
+              'marker retention',
+          )
+          if after != expected:
+              raise SystemExit('M25 changed mode_switch2_pro.cpp outside the exact identity-only delta')
+          print('M25 exact identity-only source witness PASS')
+          PY
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard F27-M25 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M25-IDSWAP-${short}" ./gen_version.sh
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M25-IdentitySwap-JoyConR-standard.uf2
+          cp build/f27-standard/OpenPuck-F27-M25-IdentitySwap-JoyConR-standard.uf2 /tmp/
+          cp build/f27-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M25-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Recompose M25 over Makerdiary build
+        run: |
+          set -eu
+          git fetch origin \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250 \
+            2f990e0f3e9401a734427e23e8223f2b9f1be799 \
+            5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 2f990e0f3e9401a734427e23e8223f2b9f1be799:tools/f27_switch2pro_m21.py > tools/f27_switch2pro_m21.py
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          make format
+          cp OpenPuck/OpenPuck.ino /tmp/mdk-m22-OpenPuck.ino
+          cp OpenPuck/f27_joycon2.cpp /tmp/mdk-m22-f27_joycon2.cpp
+          cp OpenPuck/f27_joycon2.h /tmp/mdk-m22-f27_joycon2.h
+          python3 tools/f27_switch2pro_m25.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-M25-IDENTITY-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          cmp /tmp/mdk-m22-OpenPuck.ino OpenPuck/OpenPuck.ino
+          cmp /tmp/mdk-m22-f27_joycon2.cpp OpenPuck/f27_joycon2.cpp
+          cmp /tmp/mdk-m22-f27_joycon2.h OpenPuck/f27_joycon2.h
+
+      - name: Build Makerdiary MDK F27-M25 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M25-IDSWAP-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M25-IdentitySwap-JoyConR-MDK.uf2
+          mkdir -p build/f27-standard
+          cp /tmp/OpenPuck-F27-M25-IdentitySwap-JoyConR-standard.uf2 build/f27-standard/
+          cp /tmp/OpenPuck-F27-M25-standard.hex build/f27-standard/OpenPuck.ino.hex
+
+      - name: Validate M25 artifact identity
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, os
+          build=("F27-M25-IDSWAP-"+os.environ['GITHUB_SHA'][:8]).encode()
+          marker=b'F27-M25-IDENTITY-SWAP-JCR'
+          for path in [
+              'build/f27-standard/OpenPuck-F27-M25-IdentitySwap-JoyConR-standard.uf2',
+              'build/mdk/OpenPuck-F27-M25-IdentitySwap-JoyConR-MDK.uf2',
+          ]:
+              data=Path(path).read_bytes()
+              if len(data)%512: raise SystemExit(f'non-UF2 length: {path}')
+              image=bytearray(); seen=[]; total=None; fam=None; addrs=[]
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit(f'bad magic: {path}')
+                  total=nblocks if total is None else total
+                  fam=family if fam is None else fam
+                  if nblocks!=total or family!=fam: raise SystemExit(f'inconsistent metadata: {path}')
+                  seen.append(no)
+                  if addr>=0x26000:
+                      image += b[32:32+size]; addrs.append(addr)
+              if seen != list(range(total)): raise SystemExit(f'non-sequential blocks: {path}')
+              if marker not in image: raise SystemExit(f'missing M25 marker: {path}')
+              if build not in image: raise SystemExit(f'missing M25 build label: {path}')
+              print(path,'PASS','blocks',total,'family',hex(fam),'range',hex(min(addrs)),hex(max(addrs)+256))
+          PY
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M25-IdentitySwap-JoyConR.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          m20_hardware_positive=6c2e191693fec0baadeeda8938275e6d04a5463b
+          m21_dual_topology=2f990e0f3e9401a734427e23e8223f2b9f1be799
+          m22_hidden_session_hardware_fail=5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8
+          m24_full_role_swap_hardware_fail=826d80ac79dd45905c8c7f87fcb6043b1fc3389b
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          target=F27-M25-IdentitySwap-JoyConR
+          topology=identical dual Joy-Con2-R USB descriptor/function topology and M22 payload routing
+          only_runtime_change=swap companion-vs-original controller address and factory serial roles between session0 and session1
+          session0=FIRST USB function; companion/distinct address+serial; M22 live RIGHT trackpad plus ordinary controller inputs; M22 output ownership unchanged
+          session1=SECOND USB function; original address+serial; M22 forced LEFT trackpad mouse; neutral buttons/stick; HID1 bypass unchanged
+          purpose=test whether moving original identity away from session0 alone is sufficient to break Switch 2 registration
+          result_if_none=original/live identity association with session0 is required or strongly implicated
+          result_if_m22_behavior=identity ordering alone did not break M24; isolate payload/output role movement next
+          EOF
+          sha256sum build/f27-standard/OpenPuck-F27-M25-IdentitySwap-JoyConR-standard.uf2 >> build/F27-M25-IdentitySwap-JoyConR.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-M25-IdentitySwap-JoyConR-MDK.uf2 >> build/F27-M25-IdentitySwap-JoyConR.manifest.txt
+
+      - name: Upload F27-M25 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M25-IdentitySwap-JoyConR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M25-IdentitySwap-JoyConR-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M25-IdentitySwap-JoyConR-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M25-IdentitySwap-JoyConR.manifest.txt
