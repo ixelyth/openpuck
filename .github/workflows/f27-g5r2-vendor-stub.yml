@@ -1,0 +1,137 @@
+name: F27-G5-R2 Joy-Con 2 vendor endpoint stub
+
+on:
+  push:
+    branches:
+      - f27-joycon2-g5r2-vendor-stub
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out G5-R2 branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Compose MDK plus G5-R2 source
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          python3 tools/f27_g5_integrate.py
+          python3 tools/f27_g5_re_refresh.py
+          python3 tools/f27_g5_r1_no_config_wrap.py
+          python3 tools/f27_g5_r2_vendor_stub.py
+          git diff --check
+
+      - name: Verify cumulative enumeration discriminator
+        run: |
+          set -eu
+          grep -q -- '-Wl,--wrap=tud_descriptor_device_cb' Makefile
+          grep -q -- '-Wl,--wrap=tud_hid_descriptor_report_cb' Makefile
+          grep -q -- '-Wl,--wrap=tud_hid_get_report_cb' Makefile
+          grep -q -- '-Wl,--wrap=tud_hid_set_report_cb' Makefile
+          ! grep -q -- '-Wl,--wrap=tud_descriptor_configuration_cb' Makefile
+          grep -q 'static_assert(sizeof JOYCON2_CFG_BODY == 71' OpenPuck/mode_joycon2.cpp
+          grep -q 'F27-G5-R2 enumeration discriminator' OpenPuck/mode_joycon2.cpp
+          grep -q 'ackHeader(reply, 0x08, cmd\[2\], sub)' OpenPuck/mode_joycon2.cpp
+          grep -q '0x7e, 0x05, 0x68, 0x20' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'JOYCON2_VENDOR_PROTOCOL' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'PAIR_PUBLIC' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'primaryCal' OpenPuck/mode_joycon2.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('OpenPuck/mode_joycon2.cpp').read_text()
+          a=s.index('\tif (itf->bInterfaceNumber == 1 && itf->bInterfaceClass == 0xff) {')
+          b=s.index('\n\treturn 0;\n}\n\nstatic bool driverControl', a)
+          block=s[a:b]
+          assert 'usbd_edpt_open' not in block
+          assert 'usbd_edpt_xfer' not in block
+          assert 'endpoints != 2' in block
+          assert 'g_jc2VendorEpOut = 0' in block
+          assert 'g_jc2VendorEpIn = 0' in block
+          print('G5-R2 IF1 descriptor-only stub PASS')
+          PY
+
+      - name: Build Makerdiary G5-R2 JCR
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-G5R2-JCR-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_G5_FORCE_JOYCON2=1 -DOPK_G5_JOYCON_SIDE=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-G5R2-JCR-VendorStub-MDK.uf2
+
+      - name: Validate G5-R2 UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-G5R2-JCR-VendorStub-MDK.uf2')
+          data=p.read_bytes()
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          image=bytearray(); seen=[]; total=None; fam=None
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle in (b'F27-G5-CLEAN-JCR-GRIP08', b'Joy-Con 2 (R)', b'HDL50003485519', b'F27-G5R2-JCR-'+short):
+              if needle not in image: raise SystemExit('missing marker '+repr(needle))
+          if b'Switch 2 Pro Controller' in image: raise SystemExit('Pro2 contamination')
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data))
+          PY
+
+      - name: Record diagnostic manifest
+        run: |
+          sha256sum build/mdk/OpenPuck-F27-G5R2-JCR-VendorStub-MDK.uf2 > build/mdk/F27-G5R2-JCR-VendorStub.manifest.txt
+          printf '%s\n' \
+            'base_failed_g5r1=15202753ba2ae6410351b6a0f3ae55f2bbf7c39e' \
+            'r1_result=hardware reset/re-enumeration FAIL; config wrapper exonerated' \
+            'new_change=retain captured IF1 descriptor but do not open or arm Nintendo EP02/EP82 bulk endpoints' \
+            'hid_if0=unchanged from accepted clean G5' \
+            'joycon_identity=057e:2066 JCR unchanged' \
+            'protocol_source=unchanged but bulk transport intentionally unreachable in this stability discriminator' \
+            'hardware_question=does removing vendor endpoint open/arm/xfer runtime stop the reset/re-enumeration loop?' \
+            >> build/mdk/F27-G5R2-JCR-VendorStub.manifest.txt
+
+      - name: Upload G5-R2
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-G5R2-JCR-VendorStub
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-G5R2-JCR-VendorStub-MDK.uf2
+            build/mdk/F27-G5R2-JCR-VendorStub.manifest.txt
