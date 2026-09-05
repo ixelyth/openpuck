@@ -82,8 +82,9 @@ src = replace_once(
 
 src = replace_once(
     src,
-    "\tg_sw2FeatureMask = 0;\n\tg_sw2LastRumbleBond = -1;\n",
-    "\tg_sw2FeatureMask = 0;\n"
+    "\tg_sw2FeatureMask = F27_JOYCON_INITIAL_FEATURE_MASK;\n"
+    "\tg_sw2LastRumbleBond = -1;\n",
+    "\tg_sw2FeatureMask = F27_JOYCON_INITIAL_FEATURE_MASK;\n"
     "\tg_sw2GripButtonsEnabled = false;\n"
     "\tg_sw2LastRumbleBond = -1;\n",
     "reset grip state",
