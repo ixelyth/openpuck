@@ -155,7 +155,7 @@ new_task = r'''void SwitchHoriController::task()
 	}
 }
 '''
-s = s[:task_start] + new_task + "\n"
+s = s[:task_start] + new_task
 P.write_text(s, encoding="utf-8")
 
 out = P.read_text(encoding="utf-8")
