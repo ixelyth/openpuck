@@ -198,15 +198,6 @@ struct RfRecoveryStatus {
 	uint8_t journalBuilderParticipantMask;
 	uint8_t journalBuilderBestChannel;
 	uint8_t journalBuilderFailure;
-	uint8_t idleTestMode;
-	uint8_t idleTestFlags;
-	uint8_t idleTestValueValidMask;
-	uint16_t idleTestValueSeconds[NSLOT];
-	uint16_t idleTestElapsedSeconds;
-	uint8_t idleTestPulseCount;
-	uint8_t idleTestParticipantMask;
-	uint8_t idleTestOfflineMask;
-	uint8_t idleTestFailure;
 	uint8_t handoffWaitReason;
 	uint16_t handoffNeutralMs;
 	uint8_t recoveryCooldownSeconds;
@@ -220,9 +211,6 @@ bool rfRecoveryRequestAmbientSurvey();
 bool rfRecoveryRequestHop(uint8_t channel);
 bool rfRecoveryRequestJournalBuilder();
 void rfRecoveryCancelJournalBuilder();
-bool rfRecoveryRequestIdleTimeoutRead();
-bool rfRecoveryRequestIdleTimeoutTest(bool plusOne);
-void rfRecoveryCancelIdleTimeoutTest();
 void rfRecoveryStatusSnapshot(RfRecoveryStatus *status);
 
 // TX one connected packet [LEN][S1][payload] on channel ch, then RX the reply into rfrx; decodes 0xF1.

@@ -226,6 +226,8 @@ static uint8_t g_rfJournalBuilderBadWindows[RF_CHANNEL_HISTORY_POOL_COUNT] = {};
 // restore the exact captured value. Hardware proved that a same-value write does
 // not reset inactivity, while this +1 -> original transition does. No long-lived
 // timeout override exists for Complete/Cancel/Failure to clean up.
+#define RF_JOURNAL_BUILDER_IDLE_SETTING 50u
+#define RF_JOURNAL_BUILDER_IDLE_WRITE_REPS 3u
 #define RF_JOURNAL_BUILDER_IDLE_QUERY_RETRY_MS 500u
 #define RF_JOURNAL_BUILDER_IDLE_QUERY_TIMEOUT_MS 5000u
 #define RF_JOURNAL_BUILDER_IDLE_PULSE_INTERVAL_MS 60000u
@@ -235,44 +237,6 @@ static unsigned long g_rfJournalBuilderIdleQueryStartedMs = 0;
 static unsigned long g_rfJournalBuilderIdleLastQueryMs[NSLOT] = {};
 static unsigned long g_rfJournalBuilderIdleLastPulseMs = 0;
 static bool g_rfJournalBuilderSurveyStarted = false;
-
-#define RF_IDLE_TEST_SETTING 50u
-#define RF_IDLE_TEST_DURATION_MS 600000u
-#define RF_IDLE_TEST_PULSE_INTERVAL_MS 60000u
-#define RF_IDLE_TEST_QUERY_RETRY_MS 500u
-#define RF_IDLE_TEST_QUERY_TIMEOUT_MS 5000u
-#define RF_IDLE_TEST_OFFLINE_MS 2000u
-#define RF_IDLE_TEST_WRITE_REPS 3u
-#define RF_IDLE_TEST_FLAG_VALUE_VALID 0x01u
-#define RF_IDLE_TEST_FLAG_COMPLETE 0x02u
-
-enum RfIdleTimeoutTestMode : uint8_t {
-	RF_IDLE_TEST_NONE = 0,
-	RF_IDLE_TEST_READ = 1,
-	RF_IDLE_TEST_SAME = 2,
-	RF_IDLE_TEST_PLUS_ONE = 3,
-};
-
-enum RfIdleTimeoutTestFailure : uint8_t {
-	RF_IDLE_TEST_FAIL_NONE = 0,
-	RF_IDLE_TEST_FAIL_NO_CONTROLLERS = 1,
-	RF_IDLE_TEST_FAIL_RF_BUSY = 2,
-	RF_IDLE_TEST_FAIL_QUERY_TIMEOUT = 3,
-	RF_IDLE_TEST_FAIL_TIMEOUT_DISABLED = 4,
-};
-
-static uint8_t g_rfIdleTestMode = RF_IDLE_TEST_NONE;
-static uint8_t g_rfIdleTestFlags = 0;
-static uint8_t g_rfIdleTestValueValidMask = 0;
-static uint8_t g_rfIdleTestParticipantMask = 0;
-static uint8_t g_rfIdleTestOfflineMask = 0;
-static uint8_t g_rfIdleTestFailure = RF_IDLE_TEST_FAIL_NONE;
-static uint8_t g_rfIdleTestPulseCount = 0;
-static uint16_t g_rfIdleTestValueSeconds[NSLOT] = {};
-static unsigned long g_rfIdleTestQueryStartedMs = 0;
-static unsigned long g_rfIdleTestLastQueryMs[NSLOT] = {};
-static unsigned long g_rfIdleTestStartedMs = 0;
-static unsigned long g_rfIdleTestLastPulseMs = 0;
 
 static void rfLinkQualityResetWindow(int slot);
 static void rfChannelEvidenceSyncResidence();
@@ -292,259 +256,6 @@ static bool rfJournalBuilderActive()
 }
 
 static uint8_t rfChannelLiveMask(unsigned long now);
-static bool rfIdleTimeoutRfWorkflowBusy();
-
-static bool rfIdleTimeoutTestBusy()
-{
-	return g_rfIdleTestMode != RF_IDLE_TEST_NONE &&
-	       !(g_rfIdleTestFlags & RF_IDLE_TEST_FLAG_COMPLETE) &&
-	       g_rfIdleTestFailure == RF_IDLE_TEST_FAIL_NONE;
-}
-
-static bool rfIdleTimeoutTestQueueRead(uint8_t slot)
-{
-	const uint8_t setting = RF_IDLE_TEST_SETTING;
-	return relayEnqueue(IBEX_CMD_GET_SETTINGS_VALUES, &setting, 1u, false,
-			    slot, true);
-}
-
-static bool rfIdleTimeoutTestQueueWrite(uint8_t slot, uint16_t value)
-{
-	const uint8_t payload[3] = {
-		RF_IDLE_TEST_SETTING,
-		(uint8_t)value,
-		(uint8_t)(value >> 8),
-	};
-	return relayEnqueue(IBEX_CMD_SET_SETTINGS_VALUES, payload,
-			    sizeof payload, false, slot);
-}
-
-static void rfIdleTimeoutTestReset(uint8_t mode, uint8_t mask,
-				   unsigned long now)
-{
-	g_rfIdleTestMode = mode;
-	g_rfIdleTestFlags = 0;
-	g_rfIdleTestValueValidMask = 0;
-	g_rfIdleTestParticipantMask = mask;
-	g_rfIdleTestOfflineMask = 0;
-	g_rfIdleTestFailure = RF_IDLE_TEST_FAIL_NONE;
-	g_rfIdleTestPulseCount = 0;
-	memset(g_rfIdleTestValueSeconds, 0, sizeof g_rfIdleTestValueSeconds);
-	g_rfIdleTestQueryStartedMs = now ? now : 1u;
-	memset(g_rfIdleTestLastQueryMs, 0, sizeof g_rfIdleTestLastQueryMs);
-	g_rfIdleTestStartedMs = 0;
-	g_rfIdleTestLastPulseMs = 0;
-}
-
-static bool rfIdleTimeoutTestRequest(uint8_t mode)
-{
-	if (rfIdleTimeoutTestBusy())
-		return false;
-	const unsigned long now = millis();
-	rfIdleTimeoutTestReset(mode, 0, now);
-	if (rfIdleTimeoutRfWorkflowBusy()) {
-		g_rfIdleTestFailure = RF_IDLE_TEST_FAIL_RF_BUSY;
-		return false;
-	}
-	const uint8_t mask = rfChannelLiveMask(now);
-	if (!mask) {
-		g_rfIdleTestFailure = RF_IDLE_TEST_FAIL_NO_CONTROLLERS;
-		return false;
-	}
-	g_rfIdleTestParticipantMask = mask;
-	// Freeze the diagnostic on the current residence. A pre-existing automatic
-	// recovery target or accumulated bad-window streak must not migrate the RF
-	// channel during the timeout experiment or immediately after it ends.
-	g_recoveryTargetChannel = 0;
-	g_recoveryResidenceChannel = g_sessCh;
-	g_recoveryRequestedThisResidence = false;
-	g_channelRecoveryDecidedThisResidence = false;
-	for (uint8_t s = 0; s < NSLOT; s++) {
-		rfLinkQualityResetWindow(s);
-		g_linkQualityBadStreak[s] = 0;
-	}
-	g_linkQualityCheckMs = now;
-	g_qosCheckMs = now;
-	bool queued = false;
-	for (uint8_t slot = 0; slot < NSLOT; slot++) {
-		const uint8_t bit = (uint8_t)(1u << slot);
-		if (!(mask & bit))
-			continue;
-		if (rfIdleTimeoutTestQueueRead(slot)) {
-			g_rfIdleTestLastQueryMs[slot] = now ? now : 1u;
-			queued = true;
-		}
-	}
-	if (!queued) {
-		g_rfIdleTestFailure = RF_IDLE_TEST_FAIL_QUERY_TIMEOUT;
-		return false;
-	}
-	return true;
-}
-
-bool rfRecoveryRequestIdleTimeoutRead()
-{
-	return rfIdleTimeoutTestRequest(RF_IDLE_TEST_READ);
-}
-
-bool rfRecoveryRequestIdleTimeoutTest(bool plusOne)
-{
-	return rfIdleTimeoutTestRequest(plusOne ? RF_IDLE_TEST_PLUS_ONE :
-						  RF_IDLE_TEST_SAME);
-}
-
-void rfRecoveryCancelIdleTimeoutTest()
-{
-	const unsigned long now = millis();
-	g_recoveryTargetChannel = 0;
-	g_recoveryResidenceChannel = g_sessCh;
-	g_recoveryRequestedThisResidence = false;
-	g_channelRecoveryDecidedThisResidence = false;
-	for (uint8_t s = 0; s < NSLOT; s++) {
-		rfLinkQualityResetWindow(s);
-		g_linkQualityBadStreak[s] = 0;
-	}
-	g_linkQualityCheckMs = now;
-	g_qosCheckMs = now;
-	g_rfIdleTestMode = RF_IDLE_TEST_NONE;
-	g_rfIdleTestFlags = 0;
-	g_rfIdleTestValueValidMask = 0;
-	g_rfIdleTestParticipantMask = 0;
-	g_rfIdleTestOfflineMask = 0;
-	g_rfIdleTestFailure = RF_IDLE_TEST_FAIL_NONE;
-	g_rfIdleTestPulseCount = 0;
-	memset(g_rfIdleTestValueSeconds, 0, sizeof g_rfIdleTestValueSeconds);
-	g_rfIdleTestQueryStartedMs = 0;
-	memset(g_rfIdleTestLastQueryMs, 0, sizeof g_rfIdleTestLastQueryMs);
-	g_rfIdleTestStartedMs = 0;
-	g_rfIdleTestLastPulseMs = 0;
-}
-
-static void rfIdleTimeoutTestCapture(uint8_t slot, const uint8_t *response,
-				     uint8_t responseLen)
-{
-	if (!rfIdleTimeoutTestBusy() || slot >= NSLOT || responseLen < 5u ||
-	    !(g_rfIdleTestParticipantMask & (uint8_t)(1u << slot)) ||
-	    !g_rfIdleTestLastQueryMs[slot] ||
-	    response[0] != IBEX_CMD_GET_SETTINGS_VALUES || response[1] < 3u ||
-	    response[2] != RF_IDLE_TEST_SETTING)
-		return;
-	const uint8_t bit = (uint8_t)(1u << slot);
-	if (g_rfIdleTestValueValidMask & bit)
-		return;
-	g_rfIdleTestValueSeconds[slot] = (uint16_t)response[3] |
-					 ((uint16_t)response[4] << 8);
-	g_rfIdleTestValueValidMask |= bit;
-	if ((g_rfIdleTestValueValidMask & g_rfIdleTestParticipantMask) !=
-	    g_rfIdleTestParticipantMask)
-		return;
-	g_rfIdleTestFlags |= RF_IDLE_TEST_FLAG_VALUE_VALID;
-	if (g_rfIdleTestMode == RF_IDLE_TEST_READ) {
-		g_rfIdleTestFlags |= RF_IDLE_TEST_FLAG_COMPLETE;
-		return;
-	}
-	for (uint8_t s = 0; s < NSLOT; s++) {
-		const uint8_t sbit = (uint8_t)(1u << s);
-		if ((g_rfIdleTestParticipantMask & sbit) &&
-		    !g_rfIdleTestValueSeconds[s]) {
-			g_rfIdleTestFailure =
-				RF_IDLE_TEST_FAIL_TIMEOUT_DISABLED;
-			return;
-		}
-	}
-	g_rfIdleTestStartedMs = millis();
-	g_rfIdleTestLastPulseMs = 0;
-}
-
-static void rfIdleTimeoutTestPulse(unsigned long now)
-{
-	for (uint8_t slot = 0; slot < NSLOT; slot++) {
-		const uint8_t bit = (uint8_t)(1u << slot);
-		if (!(g_rfIdleTestParticipantMask & bit) ||
-		    !(g_rfIdleTestValueValidMask & bit) ||
-		    (g_rfIdleTestOfflineMask & bit))
-			continue;
-		const uint16_t original = g_rfIdleTestValueSeconds[slot];
-		if (g_rfIdleTestMode == RF_IDLE_TEST_PLUS_ONE) {
-			const uint16_t pulse =
-				original < 32767u ? (uint16_t)(original + 1u) :
-						    (uint16_t)(original - 1u);
-			for (uint8_t i = 0; i < RF_IDLE_TEST_WRITE_REPS; i++)
-				(void)rfIdleTimeoutTestQueueWrite(slot, pulse);
-		}
-		for (uint8_t i = 0; i < RF_IDLE_TEST_WRITE_REPS; i++)
-			(void)rfIdleTimeoutTestQueueWrite(slot, original);
-	}
-	g_rfIdleTestLastPulseMs = now ? now : 1u;
-	if (g_rfIdleTestPulseCount != 0xFFu)
-		g_rfIdleTestPulseCount++;
-}
-
-static void rfIdleTimeoutTestTask()
-{
-	if (!rfIdleTimeoutTestBusy())
-		return;
-	const unsigned long now = millis();
-	if (!(g_rfIdleTestFlags & RF_IDLE_TEST_FLAG_VALUE_VALID)) {
-		if ((uint32_t)(now - g_rfIdleTestQueryStartedMs) >=
-		    RF_IDLE_TEST_QUERY_TIMEOUT_MS) {
-			g_rfIdleTestFailure = RF_IDLE_TEST_FAIL_QUERY_TIMEOUT;
-			return;
-		}
-		for (uint8_t slot = 0; slot < NSLOT; slot++) {
-			const uint8_t bit = (uint8_t)(1u << slot);
-			if (!(g_rfIdleTestParticipantMask & bit) ||
-			    (g_rfIdleTestValueValidMask & bit))
-				continue;
-			if (!g_rfIdleTestLastQueryMs[slot] ||
-			    (uint32_t)(now - g_rfIdleTestLastQueryMs[slot]) >=
-				    RF_IDLE_TEST_QUERY_RETRY_MS) {
-				if (rfIdleTimeoutTestQueueRead(slot))
-					g_rfIdleTestLastQueryMs[slot] =
-						now ? now : 1u;
-			}
-		}
-		return;
-	}
-	if (g_rfIdleTestMode == RF_IDLE_TEST_READ)
-		return;
-	if (rfIdleTimeoutRfWorkflowBusy()) {
-		g_rfIdleTestFailure = RF_IDLE_TEST_FAIL_RF_BUSY;
-		return;
-	}
-	for (uint8_t slot = 0; slot < NSLOT; slot++) {
-		const uint8_t bit = (uint8_t)(1u << slot);
-		if (!(g_rfIdleTestParticipantMask & bit) ||
-		    (g_rfIdleTestOfflineMask & bit))
-			continue;
-		if (!g_slot[slot].used || !g_connReplyMs[slot] ||
-		    (uint32_t)(now - g_connReplyMs[slot]) >=
-			    RF_IDLE_TEST_OFFLINE_MS)
-			g_rfIdleTestOfflineMask |= bit;
-	}
-	if ((uint32_t)(now - g_rfIdleTestStartedMs) >=
-	    RF_IDLE_TEST_DURATION_MS) {
-		// Resume automatic recovery from a fresh quality residence after the
-		// experiment; none of the diagnostic interval is valid hop evidence.
-		g_recoveryTargetChannel = 0;
-		g_recoveryResidenceChannel = g_sessCh;
-		g_recoveryRequestedThisResidence = false;
-		g_channelRecoveryDecidedThisResidence = false;
-		for (uint8_t s = 0; s < NSLOT; s++) {
-			rfLinkQualityResetWindow(s);
-			g_linkQualityBadStreak[s] = 0;
-		}
-		g_linkQualityCheckMs = now;
-		g_qosCheckMs = now;
-		g_rfIdleTestFlags |= RF_IDLE_TEST_FLAG_COMPLETE;
-		return;
-	}
-	if (!g_rfIdleTestLastPulseMs ||
-	    (uint32_t)(now - g_rfIdleTestLastPulseMs) >=
-		    RF_IDLE_TEST_PULSE_INTERVAL_MS)
-		rfIdleTimeoutTestPulse(now);
-}
-
 static void rfJournalBuilderResetQualityWindows()
 {
 	for (int s = 0; s < NSLOT; s++) {
@@ -1155,16 +866,9 @@ static uint8_t rfAmbientMeasureChannel(uint8_t ch, uint16_t sampleUs)
 	return strongest;
 }
 
-static bool rfIdleTimeoutRfWorkflowBusy()
-{
-	return g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive ||
-	       rfJournalBuilderActive() || g_ambientSurveyRunning ||
-	       g_ambientSurveyPending || g_ambientSurveyManual;
-}
-
 bool rfRecoveryRequestAmbientSurvey()
 {
-	if (rfJournalBuilderActive() || rfIdleTimeoutTestBusy())
+	if (rfJournalBuilderActive())
 		return false;
 	// Re-clicking an already accepted explicit survey is idempotent. If the
 	// radio is instead running an autonomous scan, explicit user intent wins:
@@ -1228,12 +932,6 @@ static bool rfAmbientSurveyComplete()
 static void rfAmbientSurveyTask()
 {
 	const unsigned long now = millis();
-	if (rfIdleTimeoutTestBusy()) {
-		// Do not let an idle-powered-off participant turn this diagnostic into an
-		// automatic RF survey. Start the normal idle guard fresh after the test.
-		g_ambientSurveyIdleSinceMs = 0;
-		return;
-	}
 	const bool live = rfChannelLiveMask(now) != 0u;
 	const bool handoff = g_rfChHandoffState != RF_CH_IDLE ||
 			     g_rfChGroupActive;
@@ -1534,25 +1232,6 @@ void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 	status->journalBuilderParticipantMask = g_rfJournalBuilderParticipants;
 	status->journalBuilderBestChannel = g_rfJournalBuilderBestChannel;
 	status->journalBuilderFailure = g_rfJournalBuilderFailure;
-	status->idleTestMode = g_rfIdleTestMode;
-	status->idleTestFlags = g_rfIdleTestFlags;
-	status->idleTestValueValidMask = g_rfIdleTestValueValidMask;
-	for (uint8_t s = 0; s < NSLOT; s++)
-		status->idleTestValueSeconds[s] = g_rfIdleTestValueSeconds[s];
-	uint32_t idleElapsed = 0;
-	if (g_rfIdleTestStartedMs &&
-	    (g_rfIdleTestMode == RF_IDLE_TEST_SAME ||
-	     g_rfIdleTestMode == RF_IDLE_TEST_PLUS_ONE)) {
-		idleElapsed =
-			(uint32_t)(millis() - g_rfIdleTestStartedMs) / 1000u;
-		if (idleElapsed > RF_IDLE_TEST_DURATION_MS / 1000u)
-			idleElapsed = RF_IDLE_TEST_DURATION_MS / 1000u;
-	}
-	status->idleTestElapsedSeconds = (uint16_t)idleElapsed;
-	status->idleTestPulseCount = g_rfIdleTestPulseCount;
-	status->idleTestParticipantMask = g_rfIdleTestParticipantMask;
-	status->idleTestOfflineMask = g_rfIdleTestOfflineMask;
-	status->idleTestFailure = g_rfIdleTestFailure;
 	status->handoffWaitReason = g_rfChHandoffWaitReason;
 	status->handoffNeutralMs = g_rfChHandoffNeutralMs;
 	const unsigned long statusNow = millis();
@@ -2262,6 +1941,33 @@ static bool rfJournalBuilderPromoteAndStartWrite(unsigned long now)
 	return true;
 }
 
+static bool rfChannelRetuneNoControllers(uint8_t channel, unsigned long now)
+{
+	if (rfChannelHistoryPoolIndex(channel) < 0 || rfChannelLiveMask(now) ||
+	    g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
+		return false;
+	if (channel == g_sessCh)
+		return true;
+	g_sessCh = channel;
+	g_rfCh = channel;
+	g_lastSessBeacon = 0;
+	g_lastDisc = 0;
+	g_lastChannelHopMs = now;
+	g_qosLastHopMs = now;
+	g_linkQualityCheckMs = now;
+	g_qosCheckMs = now;
+	for (int s = 0; s < NSLOT; s++) {
+		rfLinkQualityResetWindow(s);
+		g_linkQualityBadStreak[s] = 0;
+	}
+	rfChannelRecoverySyncResidence();
+	(void)rfChannelRecoverySetTarget(0u);
+	rfChannelEvidenceSyncResidence();
+	rfChannelHistorySyncResidence();
+	rfConfig(channel);
+	return true;
+}
+
 static bool rfJournalBuilderImmediateHop(uint8_t channel)
 {
 	if (rfChannelHistoryPoolIndex(channel) < 0)
@@ -2271,26 +1977,8 @@ static bool rfJournalBuilderImmediateHop(uint8_t channel)
 		return channel == g_sessCh;
 	const unsigned long now = millis();
 	const uint8_t mask = rfChannelLiveMask(now);
-	if (!mask) {
-		g_sessCh = channel;
-		g_rfCh = channel;
-		g_lastSessBeacon = 0;
-		g_lastDisc = 0;
-		g_lastChannelHopMs = now;
-		g_qosLastHopMs = now;
-		g_linkQualityCheckMs = now;
-		g_qosCheckMs = now;
-		for (int s = 0; s < NSLOT; s++) {
-			rfLinkQualityResetWindow(s);
-			g_linkQualityBadStreak[s] = 0;
-		}
-		rfChannelRecoverySyncResidence();
-		(void)rfChannelRecoverySetTarget(0u);
-		rfChannelEvidenceSyncResidence();
-		rfChannelHistorySyncResidence();
-		rfConfig(channel);
-		return true;
-	}
+	if (!mask)
+		return rfChannelRetuneNoControllers(channel, now);
 	return rfChannelGroupBegin(g_sessCh, channel, mask, now, true);
 }
 
@@ -2303,7 +1991,7 @@ static bool rfJournalBuilderIdleQueryComplete()
 
 static bool rfJournalBuilderIdleQueueRead(uint8_t slot)
 {
-	const uint8_t setting = RF_IDLE_TEST_SETTING;
+	const uint8_t setting = RF_JOURNAL_BUILDER_IDLE_SETTING;
 	return relayEnqueue(IBEX_CMD_GET_SETTINGS_VALUES, &setting, 1u, false,
 			    slot, true);
 }
@@ -2311,7 +1999,7 @@ static bool rfJournalBuilderIdleQueueRead(uint8_t slot)
 static bool rfJournalBuilderIdleQueueWrite(uint8_t slot, uint16_t value)
 {
 	const uint8_t payload[3] = {
-		RF_IDLE_TEST_SETTING,
+		RF_JOURNAL_BUILDER_IDLE_SETTING,
 		(uint8_t)value,
 		(uint8_t)(value >> 8),
 	};
@@ -2331,14 +2019,15 @@ static void rfJournalBuilderIdlePulse(uint8_t mask, unsigned long now)
 		// Zero disables inactivity sleep, so that controller needs no pulse.
 		if (!original)
 			continue;
-		// Match the hardware-validated +1-second diagnostic exactly. Use its
-		// conservative decrement fallback for unusually large timeout values.
+		// Hardware validation showed that a same-value write does not reset
+		// inactivity. Force a one-second transition, then immediately restore
+		// the captured timeout; decrement only for unusually large values.
 		const uint16_t pulse = original < 32767u ?
 					       (uint16_t)(original + 1u) :
 					       (uint16_t)(original - 1u);
-		for (uint8_t i = 0; i < RF_IDLE_TEST_WRITE_REPS; i++)
+		for (uint8_t i = 0; i < RF_JOURNAL_BUILDER_IDLE_WRITE_REPS; i++)
 			(void)rfJournalBuilderIdleQueueWrite(slot, pulse);
-		for (uint8_t i = 0; i < RF_IDLE_TEST_WRITE_REPS; i++)
+		for (uint8_t i = 0; i < RF_JOURNAL_BUILDER_IDLE_WRITE_REPS; i++)
 			(void)rfJournalBuilderIdleQueueWrite(slot, original);
 	}
 	g_rfJournalBuilderIdleLastPulseMs = now ? now : 1u;
@@ -2351,7 +2040,7 @@ static void rfJournalBuilderIdleCapture(uint8_t slot, const uint8_t *response,
 	    !(g_rfJournalBuilderParticipants & (uint8_t)(1u << slot)) ||
 	    !g_rfJournalBuilderIdleLastQueryMs[slot] ||
 	    response[0] != IBEX_CMD_GET_SETTINGS_VALUES || response[1] < 3u ||
-	    response[2] != RF_IDLE_TEST_SETTING)
+	    response[2] != RF_JOURNAL_BUILDER_IDLE_SETTING)
 		return;
 	const uint8_t bit = (uint8_t)(1u << slot);
 	if (g_rfJournalBuilderIdleValueValidMask & bit)
@@ -2394,11 +2083,6 @@ bool rfRecoveryRequestJournalBuilder()
 {
 	const unsigned long now = millis();
 	rfChannelHistoryEnsureLoaded();
-	if (rfIdleTimeoutTestBusy()) {
-		g_rfJournalBuilderPhase = RF_JOURNAL_BUILDER_FAILED;
-		g_rfJournalBuilderFailure = RF_JOURNAL_BUILDER_FAIL_BUSY;
-		return false;
-	}
 	// WebUSB status can lag a successful start request. Treat a duplicate Start
 	// while this Builder already owns the workflow as an idempotent success
 	// instead of converting the in-progress run into a false BUSY failure.
@@ -2989,7 +2673,7 @@ static void rfLinkQualityTask()
 {
 	const unsigned long now = millis();
 	rfChannelHistoryEnsureLoaded();
-	if (!rfJournalBuilderActive() && !rfIdleTimeoutTestBusy())
+	if (!rfJournalBuilderActive())
 		rfChannelHistoryMaybeCheckpoint(now);
 	if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive) {
 		// Handoff acquisition and rollback are transition traffic, not a stable
@@ -3001,15 +2685,6 @@ static void rfLinkQualityTask()
 		return;
 	}
 	if (g_ambientSurveyManual) {
-		for (int s = 0; s < NSLOT; s++)
-			rfLinkQualityResetWindow(s);
-		g_linkQualityCheckMs = now;
-		g_qosCheckMs = now;
-		return;
-	}
-	if (rfIdleTimeoutTestBusy()) {
-		// Test-only isolation: normal polling stays live, but quality evidence and
-		// automatic recovery do not change channels during the A/B experiment.
 		for (int s = 0; s < NSLOT; s++)
 			rfLinkQualityResetWindow(s);
 		g_linkQualityCheckMs = now;
@@ -3612,19 +3287,15 @@ void rfHopTo(uint8_t newCh)
 
 bool rfRecoveryRequestHop(uint8_t channel)
 {
-	if (rfJournalBuilderActive() || rfIdleTimeoutTestBusy() ||
-	    rfChannelHistoryPoolIndex(channel) < 0)
+	if (rfJournalBuilderActive() || rfChannelHistoryPoolIndex(channel) < 0)
 		return false;
 	if (channel == g_sessCh)
 		return true;
 	if (g_rfChHandoffState != RF_CH_IDLE || g_rfChGroupActive)
 		return false;
 	const unsigned long now = millis();
-	if (!rfChannelLiveMask(now))
-		return false;
-	// A user-selected Hop uses the production automatic handoff path: freeze
-	// the live cohort, require a fresh report from every participant, and honor
-	// the continuously accumulated 250-ms neutral dwell before E4.
+	const uint8_t liveMask = rfChannelLiveMask(now);
+	// Explicit user intent owns the radio over a standalone ambient scan.
 	if (g_ambientSurveyRunning)
 		rfAmbientSurveyAbort();
 	g_ambientSurveyPending = false;
@@ -3635,6 +3306,11 @@ bool rfRecoveryRequestHop(uint8_t channel)
 		g_recoveryLastFailedTarget = 0;
 	g_recoveryRequestedThisResidence = false;
 	g_channelRecoveryDecidedThisResidence = true;
+	// With no live controller there is nobody to coordinate via E4. Retune
+	// the puck/session directly so the next controller is advertised the
+	// newly selected channel. Live cohorts keep the neutral-gated path.
+	if (!liveMask)
+		return rfChannelRetuneNoControllers(channel, now);
 	if (!rfChannelRecoverySetTarget(channel))
 		return false;
 	rfChannelRecoveryRequest(true);
@@ -4100,10 +3776,6 @@ uint8_t rfConnTx(uint8_t ch, uint8_t s1, const uint8_t *payload, uint8_t plen,
 								(uint8_t)
 									g_curSlot,
 								rec, tlen);
-							rfIdleTimeoutTestCapture(
-								(uint8_t)
-									g_curSlot,
-								rec, tlen);
 						}
 						if (ttype == 4 && tlen >= 2 &&
 						    rec[0] != 0 &&
@@ -4408,7 +4080,6 @@ static void rfConnStep()
 void rfLinkTask()
 {
 	rfChannelHandoffTask();
-	rfIdleTimeoutTestTask();
 	rfJournalBuilderTask();
 	if (rfChannelHandoffOwnsRadio())
 		return;
@@ -4494,8 +4165,7 @@ void rfLinkTask()
 	// connected slot being stalled, so one controller walking off (others still live) never trips it; the
 	// cooldown gate keeps it from firing while a controller is intentionally powering off; rate-limited so it
 	// cannot thrash. g_rfStallRecover is surfaced to the panel so the wedge -- and its recovery -- is observable.
-	if (!rfIdleTimeoutTestBusy() && g_connOn && g_curSlot >= 0 &&
-	    millis() - g_connCooldown > 2500) {
+	if (g_connOn && g_curSlot >= 0 && millis() - g_connCooldown > 2500) {
 		static unsigned long lastRecoverMs = 0;
 		static uint8_t consecStall = 0;
 		unsigned long nowMs2 = millis();
