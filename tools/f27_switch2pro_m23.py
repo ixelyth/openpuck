@@ -26,19 +26,14 @@ src = replace_once(
     "build marker",
 )
 
-# Session 0 remains Joy-Con 2 R PID 2066. Session 1 advertises Joy-Con 2 L
-# PID 2067 through its per-session factory/SPI identity. EP0 remains the shared
-# Joy-Con-R logical PID because there is only one physical USB control endpoint.
+# Exactly two sessions exist in this probe: index 0 is R, index 1 is L.
 src = replace_once(
     src,
     "\t\t\tblock[pid - address] = 0x66;\n",
-    "\t\t\tblock[pid - address] =\n"
-    "\t\t\t\tg_sw2SessionCtx == M15_SW2_JOYCON_R ? 0x67 : 0x66;\n",
+    "\t\t\tblock[pid - address] = g_sw2SessionCtx ? 0x67 : 0x66;\n",
     "companion factory PID 2067",
 )
 
-# The session-aware report selector must accept/force 0x07 for the left half
-# while preserving 0x08 for the visible right half.
 src = replace_once(
     src,
     '''\t\tif (sw2JoyconR()) {
@@ -65,16 +60,14 @@ src = replace_once(
 src = replace_once(
     src,
     "\t\tg_sw2ActiveReport = sw2JoyconR() ? 0x08 : 0x09;\n",
-    "\t\tg_sw2ActiveReport =\n"
-    "\t\t\tg_sw2SessionCtx == M15_SW2_JOYCON_R ? 0x07 : 0x08;\n",
+    "\t\tg_sw2ActiveReport = g_sw2SessionCtx ? 0x07 : 0x08;\n",
     "reset report default",
 )
 
 src = replace_once(
     src,
     "\t\tg_sw2Sessions[s].activeReport = 0x08;\n",
-    "\t\tg_sw2Sessions[s].activeReport =\n"
-    "\t\t\ts == M15_SW2_JOYCON_R ? 0x07 : 0x08;\n",
+    "\t\tg_sw2Sessions[s].activeReport = s ? 0x07 : 0x08;\n",
     "beginPool report defaults",
 )
 
