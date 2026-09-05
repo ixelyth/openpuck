@@ -1,0 +1,151 @@
+name: F27 JC2 latest non-clean endpoint
+
+on:
+  push:
+    branches:
+      - f27-jc2-latest-nonclean-oobfix
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+      - name: Compose latest Joy-Con endpoint on Makerdiary base
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          python3 tools/f27_g5_integrate.py
+          python3 tools/f27_g5_re_refresh.py
+          python3 tools/f27_g5_nonclean_oobfix.py
+          python3 tools/f27_g5_nonclean_markers.py
+          git diff --check
+      - name: Verify full non-clean causal contract
+        run: |
+          set -eu
+          grep -q '#define MODE_JOYCON2 13' OpenPuck/config.h
+          grep -q 'JOYCON2(jcr/jcl)' OpenPuck/OpenPuck.ino
+          ! grep -q 'joyCon2Clean' OpenPuck/OpenPuck.ino
+          grep -q 'if (!puckMode && !keepCdc && !psClean)' OpenPuck/OpenPuck.ino
+          grep -q 'if (!puckMode && !psClean)' OpenPuck/OpenPuck.ino
+          grep -q 'OPK_G5_START_JOYCON2_ONCE' OpenPuck/OpenPuck.ino
+          ! grep -q -- '--wrap=tud_descriptor_configuration_cb' Makefile
+          ! grep -q '__wrap_tud_descriptor_configuration_cb' OpenPuck/mode_joycon2.cpp
+          grep -q -- '--wrap=tud_descriptor_device_cb' Makefile
+          grep -q -- '--wrap=tud_hid_descriptor_report_cb' Makefile
+          grep -q 'static_assert(sizeof JOYCON2_HID_DESC == 100' OpenPuck/mode_joycon2.cpp
+          grep -q 'static_assert(sizeof JOYCON2_CFG_BODY == 71' OpenPuck/mode_joycon2.cpp
+          grep -q 'case 0x08:' OpenPuck/mode_joycon2.cpp
+          grep -q 'ackHeader(reply, 0x08, cmd\[2\], sub)' OpenPuck/mode_joycon2.cpp
+          grep -q '0x01, 0x00, 0x0e, JC2_CONTROLLER_TYPE' OpenPuck/mode_joycon2.cpp
+          grep -q '0xff, 0xff, 0xff, 0xff' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'JOYCON2_VENDOR_PROTOCOL' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'PAIR_PUBLIC' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'primaryCal' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
+          ! grep -Eq 'TUSB_CLASS_AUDIO|audioOut|audioIn|AUDIO_' OpenPuck/mode_joycon2.cpp
+          grep -q 'run: pip install adafruit-nrfutil intelhex' .github/workflows/f27-jc2-latest-nonclean.yml
+          echo 'latest non-clean Joy-Con contract guard PASS'
+      - name: Format and check
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+          make format
+          make check
+          git diff --check
+      - name: Build Makerdiary JCR
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-JC2-NC-JCR-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_G5_START_JOYCON2_ONCE=1 -DOPK_G5_JOYCON_SIDE=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCR-MDK.uf2
+          cp build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCR-MDK.uf2 /tmp/
+      - name: Build Makerdiary JCL
+        run: |
+          set -eu
+          rm -rf build/mdk build/cache/mdk
+          rm -f OpenPuck/git_version.h
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-JC2-NC-JCL-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_G5_START_JOYCON2_ONCE=1 -DOPK_G5_JOYCON_SIDE=1"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCL-MDK.uf2
+          cp /tmp/OpenPuck-F27-JC2-Latest-NonClean-JCR-MDK.uf2 build/mdk/
+      - name: Validate UF2s
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          sha=os.environ['GITHUB_SHA'][:8]
+          checks=[
+            ('build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCR-MDK.uf2', b'F27-JC2-LATEST-NONCLEAN-JCR', b'Joy-Con 2 (R)', ('F27-JC2-NC-JCR-'+sha).encode()),
+            ('build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCL-MDK.uf2', b'F27-JC2-LATEST-NONCLEAN-JCL', b'Joy-Con 2 (L)', ('F27-JC2-NC-JCL-'+sha).encode()),
+          ]
+          for path, marker, product, build in checks:
+              data=Path(path).read_bytes(); image=bytearray(); seen=[]; total=None; fam=None
+              if len(data)%512: raise SystemExit(path+': bad UF2 length')
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit(path+': bad magic')
+                  total=nblocks if total is None else total
+                  fam=family if fam is None else fam
+                  if nblocks!=total or family!=fam: raise SystemExit(path+': metadata mismatch')
+                  seen.append(no)
+                  if addr>=0x26000: image += b[32:32+size]
+              if seen != list(range(total)): raise SystemExit(path+': nonsequential UF2')
+              for needle,label in [(marker,'nonclean marker'),(product,'product'),(build,'build marker'),(b'JOYCON2(jcr/jcl)','mode-name fix')]:
+                  if needle not in image: raise SystemExit(path+': missing '+label)
+              if b'Switch 2 Pro Controller' in image: raise SystemExit(path+': Pro2 contamination')
+              print(path,'sha256',hashlib.sha256(data).hexdigest(),'blocks',total,'family',hex(fam),'bytes',len(data))
+          PY
+      - name: Record manifest
+        run: |
+          cat > build/mdk/F27-JC2-Latest-NonClean.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          upstream_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          endpoint_source=f27-joycon2-g5-clean-jcr-grip@c711b8c6ce099965995ea6e42e93e2cdce47cb26 plus current G5 RE refresh
+          mode_table_fix=MODE_NAME index 13 added; confirmed S1/S1P OOB removed
+          composite_policy=normal non-PS OpenPuck policy, same class of wake-HID + WebUSB composition used by HORIPAD
+          joycon_interfaces=IF0 HID plus IF1 Nintendo vendor bulk, registered first
+          appended_interfaces=wake HID plus WebUSB
+          exact_80byte_config_wrapper=removed
+          device_class_wrapper=retained EF/02/01
+          hid_report_wrapper=retained captured 100-byte Joy-Con descriptor
+          first_boot_policy=Joy-Con once per build hash; subsequent mode changes/persistence are honored
+          permanent_force_mode=removed
+          charging_grip_command=0x08 current RE-refresh implementation
+          switch2pro_source_dependency=NONE
+          hardware_question=does the full latest JCR endpoint remain stable and function when exposed as a non-clean composite?
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCR-MDK.uf2 >> build/mdk/F27-JC2-Latest-NonClean.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCL-MDK.uf2 >> build/mdk/F27-JC2-Latest-NonClean.manifest.txt
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-JC2-Latest-NonClean
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCR-MDK.uf2
+            build/mdk/OpenPuck-F27-JC2-Latest-NonClean-JCL-MDK.uf2
+            build/mdk/F27-JC2-Latest-NonClean.manifest.txt
