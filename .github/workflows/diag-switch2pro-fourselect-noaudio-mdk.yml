@@ -1,0 +1,130 @@
+name: Switch2Pro four-select no-audio MDK diagnostic
+
+on:
+  push:
+    branches: [diag-switch2pro-fourselect-noaudio-mdk]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify PR269 base and branch scope
+        run: |
+          set -eu
+          BASE=cafaba6eae52b997c685eecbaea97eb7dadfb050
+          test "$(git merge-base HEAD "$BASE")" = "$BASE"
+          git diff --name-only "$BASE"..HEAD | sort > /tmp/branch-files
+          cat /tmp/branch-files
+          test "$(wc -l < /tmp/branch-files)" -eq 2
+          grep -qx '.github/workflows/diag-switch2pro-fourselect-noaudio-mdk.yml' /tmp/branch-files
+          grep -qx 'tools/diag_switch2pro_fourselect_noaudio.py' /tmp/branch-files
+
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Apply Makerdiary MDK support only
+        run: |
+          set -eu
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --cached --check
+
+      - name: Apply FourSelect no-audio transform
+        run: |
+          set -eu
+          python3 tools/diag_switch2pro_fourselect_noaudio.py
+          git diff --check
+          grep -q 'sizeof SWITCH2_PRO_CFG_BODY == 191' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'vendorOut != 0x05 || vendorIn != 0x85' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'itf->bInterfaceNumber < 4' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'TUSB_CLASS_AUDIO' OpenPuck/mode_switch2_pro.cpp
+          mkdir -p build/diag
+          git diff -- OpenPuck/mode_switch2_pro.cpp > build/diag/Switch2Pro-FourSelect-NoAudio.patch
+          test -s build/diag/Switch2Pro-FourSelect-NoAudio.patch
+
+      - name: Generate diagnostic version
+        run: OPK_BUILD_VERSION='SW2P4SELECT-NOAUDIO-cafaba6' ./gen_version.sh
+
+      - name: Build standard target
+        run: |
+          mkdir -p build/std build/cache/std
+          make build BUILD_PATH=build/cache/std OUTPUT_DIR=build/std
+
+      - name: Build Makerdiary MDK target
+        run: make build-mdk
+
+      - name: Generate MDK UF2
+        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK.uf2
+
+      - name: Validate UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, hashlib
+          p=Path('build/mdk/OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK.uf2')
+          d=p.read_bytes()
+          if len(d)%512: raise SystemExit('bad UF2 length')
+          family=None; total=None; seen=[]; image=bytearray(); addrs=[]
+          for off in range(0,len(d),512):
+              b=d[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,fam=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
+              family=fam if family is None else family
+              total=nblocks if total is None else total
+              if fam!=family or nblocks!=total: raise SystemExit('inconsistent UF2')
+              seen.append(no); addrs.append(addr)
+              if addr>=0x26000: image += b[32:32+size]
+          if family!=0xADA52840: raise SystemExit('wrong family')
+          if seen!=list(range(total)): raise SystemExit('block order')
+          if b'SW2P4SELECT-NOAUDIO-cafaba6' not in image: raise SystemExit('missing marker')
+          print('PASS',len(d),total,hex(min(addrs)),hex(max(addrs)+256),hashlib.sha256(d).hexdigest())
+          PY
+
+      - name: Write manifest
+        run: |
+          cat > build/mdk/Switch2Pro-FourSelect-NoAudio.manifest.txt <<'EOF'
+          purpose=Switch2Pro four-controller same-address FourSelect topology discriminator
+          base=PR269 switch2pro head cafaba6eae52b997c685eecbaea97eb7dadfb050
+          device_identity=057E:2069 Nintendo Switch 2 Pro Controller
+          audio=OMITTED intentionally
+          hid_paths=4 full Pro2 HID IN/OUT interfaces
+          vendor_sessions=1 shared Nintendo vendor IN/OUT interface
+          selectors=L4->HID1,R4->HID2,L5->HID3,R5->HID4
+          neutral_policy=no selector or multiple selectors => all four neutral
+          rf_sources=1 real live Steam Controller
+          reviewer_branch_modified=no
+          EOF
+          sha256sum build/mdk/OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK.uf2 >> build/mdk/Switch2Pro-FourSelect-NoAudio.manifest.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/mdk/Switch2Pro-FourSelect-NoAudio.manifest.txt
+            build/diag/Switch2Pro-FourSelect-NoAudio.patch
