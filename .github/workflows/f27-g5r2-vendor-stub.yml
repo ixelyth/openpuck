@@ -50,32 +50,36 @@ jobs:
 
       - name: Verify cumulative enumeration discriminator
         run: |
-          set -eu
-          grep -q -- '-Wl,--wrap=tud_descriptor_device_cb' Makefile
-          grep -q -- '-Wl,--wrap=tud_hid_descriptor_report_cb' Makefile
-          grep -q -- '-Wl,--wrap=tud_hid_get_report_cb' Makefile
-          grep -q -- '-Wl,--wrap=tud_hid_set_report_cb' Makefile
-          ! grep -q -- '-Wl,--wrap=tud_descriptor_configuration_cb' Makefile
-          grep -q 'static_assert(sizeof JOYCON2_CFG_BODY == 71' OpenPuck/mode_joycon2.cpp
-          grep -q 'F27-G5-R2 enumeration discriminator' OpenPuck/mode_joycon2.cpp
-          grep -q 'ackHeader(reply, 0x08, cmd\[2\], sub)' OpenPuck/mode_joycon2.cpp
-          grep -q '0x7e, 0x05, 0x68, 0x20' OpenPuck/mode_joycon2.cpp
-          ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
-          ! grep -q 'JOYCON2_VENDOR_PROTOCOL' OpenPuck/mode_joycon2.cpp
-          ! grep -q 'PAIR_PUBLIC' OpenPuck/mode_joycon2.cpp
-          ! grep -q 'primaryCal' OpenPuck/mode_joycon2.cpp
           python3 - <<'PY'
           from pathlib import Path
+          make=Path('Makefile').read_text()
           s=Path('OpenPuck/mode_joycon2.cpp').read_text()
+          def require(label, ok):
+              print(label, 'PASS' if ok else 'FAIL')
+              if not ok:
+                  raise SystemExit('G5-R2 verification failed: '+label)
+          require('device descriptor wrapper retained', '-Wl,--wrap=tud_descriptor_device_cb' in make)
+          require('HID descriptor wrapper retained', '-Wl,--wrap=tud_hid_descriptor_report_cb' in make)
+          require('HID GET wrapper retained', '-Wl,--wrap=tud_hid_get_report_cb' in make)
+          require('HID SET wrapper retained', '-Wl,--wrap=tud_hid_set_report_cb' in make)
+          require('R1 config wrapper remains removed', '-Wl,--wrap=tud_descriptor_configuration_cb' not in make)
+          require('captured 71-byte config body retained', 'static_assert(sizeof JOYCON2_CFG_BODY == 71' in s)
+          require('R2 marker present', 'G5-R2 enumeration discriminator' in s)
+          require('Grip ACK semantics retained', 'ackHeader(reply, 0x08, cmd[2], sub)' in s)
+          require('Grip 2068 factory identity retained', '0x7e, 0x05, 0x68, 0x20' in s)
+          require('Pro2 product absent', 'Switch 2 Pro Controller' not in s)
+          require('legacy vendor protocol blob absent', 'JOYCON2_VENDOR_PROTOCOL' not in s)
+          require('pairing public key absent', 'PAIR_PUBLIC' not in s)
+          require('Pro2 primary calibration sample absent', 'primaryCal' not in s)
           a=s.index('\tif (itf->bInterfaceNumber == 1 && itf->bInterfaceClass == 0xff) {')
           b=s.index('\n\treturn 0;\n}\n\nstatic bool driverControl', a)
           block=s[a:b]
-          assert 'usbd_edpt_open' not in block
-          assert 'usbd_edpt_xfer' not in block
-          assert 'endpoints != 2' in block
-          assert 'g_jc2VendorEpOut = 0' in block
-          assert 'g_jc2VendorEpIn = 0' in block
-          print('G5-R2 IF1 descriptor-only stub PASS')
+          require('IF1 does not call usbd_edpt_open', 'usbd_edpt_open' not in block)
+          require('IF1 does not arm usbd_edpt_xfer', 'usbd_edpt_xfer' not in block)
+          require('IF1 still validates two endpoint descriptors', 'endpoints != 2' in block)
+          require('IF1 leaves OUT endpoint closed', 'g_jc2VendorEpOut = 0' in block)
+          require('IF1 leaves IN endpoint closed', 'g_jc2VendorEpIn = 0' in block)
+          print('G5-R2 cumulative source guard PASS')
           PY
 
       - name: Build Makerdiary G5-R2 JCR
