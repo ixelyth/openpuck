@@ -1,0 +1,171 @@
+name: F27-M14 Switch2Pro common 0x05 optical probe
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m14
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M14
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Apply isolated M14 runtime probe
+        run: python3 tools/f27_switch2pro_m14.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify pure reconciled experiment source
+        run: |
+          make format
+          make check
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "OpenPuck/mode_switch2_pro.cpp"
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Keep both packages intentionally unpinned, matching project policy.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard F27-M14 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M14-PRO-C05-${short}" ./gen_version.sh
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M14-ProCommon05-RMouse-standard.uf2
+          cp build/f27-standard/OpenPuck-F27-M14-ProCommon05-RMouse-standard.uf2 /tmp/
+          cp build/f27-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M14-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          # This is the validated current-main composition of canonical
+          # Makerdiary support 0d1b378e; no RF source commit is inherited.
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Reapply M14 over Makerdiary build composition
+        run: |
+          python3 tools/f27_switch2pro_m14.py
+          make format
+          make check
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-M14' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Build Makerdiary MDK F27-M14 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M14-PRO-C05-${short}" ./gen_version.sh
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M14-ProCommon05-RMouse-MDK.uf2
+          mkdir -p build/f27-standard
+          cp /tmp/OpenPuck-F27-M14-ProCommon05-RMouse-standard.uf2 build/f27-standard/
+          cp /tmp/OpenPuck-F27-M14-standard.hex build/f27-standard/OpenPuck.ino.hex
+
+      - name: Validate M14 artifact identity
+        run: |
+          set -eu
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+
+          def extract(path):
+              data = Path(path).read_bytes()
+              out = bytearray()
+              for off in range(0, len(data), 512):
+                  b = data[off:off+512]
+                  if len(b) != 512:
+                      raise SystemExit(f"short UF2 block in {path}")
+                  m0, m1, flags, addr, size, no, total, family = struct.unpack_from("<IIIIIIII", b, 0)
+                  if (m0, m1) != (0x0A324655, 0x9E5D5157):
+                      raise SystemExit(f"bad UF2 magic in {path}")
+                  if size > 476:
+                      raise SystemExit(f"bad UF2 payload size in {path}")
+                  if addr >= 0x26000:
+                      out += b[32:32+size]
+              return bytes(out)
+
+          marker = b"F27-M14-PRO-C05-"
+          for p in [
+              "build/f27-standard/OpenPuck-F27-M14-ProCommon05-RMouse-standard.uf2",
+              "build/mdk/OpenPuck-F27-M14-ProCommon05-RMouse-MDK.uf2",
+          ]:
+              image = extract(p)
+              if marker not in image:
+                  raise SystemExit(f"missing M14 marker in {p}")
+              print(p, "marker PASS", len(image))
+          PY
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M14-ProCommon05-RMouse.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          runtime_base_tree=530264b182ea3f3f9b7bbbc32670039d01b40eea
+          makerdiary_authority=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          target=F27-M14-ProCommon05-RMouse
+          prior_m13=PID2069 accepted as Switch2Pro but JoyCon-R native report08 mouse pointer failed
+          identity=unchanged Switch2Pro VID057E PID2069, Pro firmware/factory/session identity
+          normal_stream=host-selected Pro native report09 outside mouse activity
+          probe_stream=common report05 while right Steam trackpad touched plus one off-surface release report05
+          optical_xy=wrapping absolute u16 accumulators fed by M3-equivalent Steam-pad delta scaling
+          optical_unknowns=experimental on-surface quality FFFF + LOD/state 0017; off-surface quality 0000 + LOD FFFF
+          feature_info=experimental JoyCon-style mouse capability byte 03 at feature bit4 position
+          scope=isolated hardware discriminator only; not production Switch2Pro mouse behavior
+          EOF
+          sha256sum build/f27-standard/OpenPuck-F27-M14-ProCommon05-RMouse-standard.uf2 >> build/F27-M14-ProCommon05-RMouse.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-M14-ProCommon05-RMouse-MDK.uf2 >> build/F27-M14-ProCommon05-RMouse.manifest.txt
+
+      - name: Upload F27-M14 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M14-ProCommon05-RMouse
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M14-ProCommon05-RMouse-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M14-ProCommon05-RMouse-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M14-ProCommon05-RMouse.manifest.txt
