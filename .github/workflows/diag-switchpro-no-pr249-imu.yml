@@ -1,0 +1,181 @@
+name: Switch Pro no-PR249 IMU reconnect diagnostic
+
+on:
+  push:
+    branches:
+      - diag-switchpro-no-pr249-imu
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out diagnostic branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Apply isolated legacy Switch Pro diagnostic
+        run: python3 tools/diag_switchpro_no_pr249_imu.py
+
+      - name: Verify exact source delta
+        run: |
+          set -eu
+          test "$(git diff --name-only)" = "OpenPuck/haptics.cpp"
+          test "$(git diff --numstat -- OpenPuck/haptics.cpp)" = $'1\t1\tOpenPuck/haptics.cpp'
+          grep -q 'if (g_usbMode == MODE_SW2_PRO)' OpenPuck/haptics.cpp
+          ! grep -q 'if (g_usbMode == MODE_SW_PRO || g_usbMode == MODE_SW2_PRO)' OpenPuck/haptics.cpp
+          grep -q 'SETTING_IMU_MODE' OpenPuck/haptics.cpp
+          grep -q 'SETTING_GYRO_MODE_SEND_RAW_ACCEL' OpenPuck/haptics.cpp
+          grep -q 'SETTING_GYRO_MODE_SEND_RAW_GYRO' OpenPuck/haptics.cpp
+          git diff --check
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Validate source
+        run: |
+          clang-format-18 --dry-run --Werror OpenPuck/haptics.cpp
+          make check
+          git diff --check
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Intentionally unpinned per current OpenPuck build policy.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard diagnostic target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="SP-NO249IMU-${short}" ./gen_version.sh
+          mkdir -p build/diag-standard build/cache/diag-standard
+          make build \
+            BUILD_PATH=build/cache/diag-standard \
+            OUTPUT_DIR=build/diag-standard
+          ./gen_uf2.sh build/diag-standard/OpenPuck.ino.hex \
+            build/diag-standard/OpenPuck-SwitchPro-NoPR249-IMU-standard.uf2
+          cp build/diag-standard/OpenPuck-SwitchPro-NoPR249-IMU-standard.uf2 /tmp/
+          cp build/diag-standard/OpenPuck.ino.hex /tmp/OpenPuck-SwitchPro-NoPR249-IMU-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Reapply isolated diagnostic over MDK composition
+        run: |
+          python3 tools/diag_switchpro_no_pr249_imu.py
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' Makefile OpenPuck/haptics.cpp OpenPuck/OpenPuck.ino OpenPuck/fault_diag.cpp | sort)" || true
+          grep -q 'if (g_usbMode == MODE_SW2_PRO)' OpenPuck/haptics.cpp
+          ! grep -q 'if (g_usbMode == MODE_SW_PRO || g_usbMode == MODE_SW2_PRO)' OpenPuck/haptics.cpp
+          git diff --check
+
+      - name: Build Makerdiary MDK diagnostic target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="SP-NO249IMU-${short}" ./gen_version.sh
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-SwitchPro-NoPR249-IMU-MDK.uf2
+          mkdir -p build/diag-standard
+          cp /tmp/OpenPuck-SwitchPro-NoPR249-IMU-standard.uf2 build/diag-standard/
+          cp /tmp/OpenPuck-SwitchPro-NoPR249-IMU-standard.hex build/diag-standard/OpenPuck.ino.hex
+
+      - name: Validate UF2 identity
+        run: |
+          set -eu
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, struct
+
+          marker = ("SP-NO249IMU-" + os.environ["GITHUB_SHA"][:8]).encode()
+          for path in [
+              "build/diag-standard/OpenPuck-SwitchPro-NoPR249-IMU-standard.uf2",
+              "build/mdk/OpenPuck-SwitchPro-NoPR249-IMU-MDK.uf2",
+          ]:
+              data = Path(path).read_bytes()
+              if len(data) % 512:
+                  raise SystemExit(f"non-UF2 length: {path}")
+              seen = []
+              total = family = None
+              image = bytearray()
+              addrs = []
+              for off in range(0, len(data), 512):
+                  b = data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,fam = struct.unpack_from("<IIIIIIII", b, 0)
+                  if (m0,m1) != (0x0A324655,0x9E5D5157):
+                      raise SystemExit(f"bad UF2 magic: {path}")
+                  if size > 476:
+                      raise SystemExit(f"bad UF2 payload: {path}")
+                  total = nblocks if total is None else total
+                  family = fam if family is None else family
+                  if nblocks != total or fam != family:
+                      raise SystemExit(f"inconsistent UF2 metadata: {path}")
+                  seen.append(no)
+                  if addr >= 0x26000:
+                      image += b[32:32+size]
+                      addrs.append(addr)
+              if seen != list(range(total)):
+                  raise SystemExit(f"non-sequential UF2 blocks: {path}")
+              if marker not in image:
+                  raise SystemExit(f"missing diagnostic build label: {path}")
+              if family != 0xADA52840:
+                  raise SystemExit(f"wrong UF2 family: {path}: {family:#x}")
+              print(path, "PASS", "blocks", total, "range", hex(min(addrs)), hex(max(addrs)+256))
+          PY
+
+      - name: Record diagnostic manifest
+        run: |
+          cat > build/SwitchPro-NoPR249-IMU.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          runtime_base_tree=530264b182ea3f3f9b7bbbc32670039d01b40eea
+          makerdiary_authority=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          diagnostic=legacy Switch Pro only: do not enqueue PR249 raw-IMU 0x18 setting on reconnect
+          switch2pro_pr249_behavior=retained unchanged
+          all_other_runtime_behavior=unchanged from runtime_base plus ordinary Makerdiary build composition
+          EOF
+          sha256sum build/diag-standard/OpenPuck-SwitchPro-NoPR249-IMU-standard.uf2 >> build/SwitchPro-NoPR249-IMU.manifest.txt
+          sha256sum build/mdk/OpenPuck-SwitchPro-NoPR249-IMU-MDK.uf2 >> build/SwitchPro-NoPR249-IMU.manifest.txt
+
+      - name: Upload diagnostic package
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-SwitchPro-NoPR249-IMU
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/diag-standard/OpenPuck-SwitchPro-NoPR249-IMU-standard.uf2
+            build/diag-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-SwitchPro-NoPR249-IMU-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/SwitchPro-NoPR249-IMU.manifest.txt
