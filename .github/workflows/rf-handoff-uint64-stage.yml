@@ -1,0 +1,84 @@
+name: Temporary widen RF handoff telemetry to uint64
+
+on:
+  push:
+    branches:
+      - rf-recovery-journal-persist-stage
+    paths:
+      - '.github/workflows/rf-handoff-uint64-stage.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: rf-recovery-journal-persist-stage
+          fetch-depth: 0
+      - name: Widen elapsed telemetry and make it millis-wrap safe
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {count}: {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once('OpenPuck/rf_link.h',
+                       '\tuint32_t handoffElapsedMs;\n',
+                       '\tuint64_t handoffElapsedMs;\n')
+
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''// Separate from g_rfChHandoffStartedMs: authorization resets that timer for the host-grace window,\n// while the panel needs elapsed time from the original recovery request.\nstatic unsigned long g_rfChHandoffTelemetryStartedMs = 0;\n''',
+                       '''// Separate from g_rfChHandoffStartedMs: authorization resets that timer for the\n// host-grace window. Accumulating loop-to-loop deltas keeps panel telemetry\n// correct across the 32-bit millis() wrap without affecting handoff admission.\nstatic uint64_t g_rfChHandoffTelemetryElapsedMs = 0;\nstatic uint32_t g_rfChHandoffTelemetryLastMs = 0;\n''')
+
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''\tg_rfChHandoffManualImmediate = false;\n\tg_rfChHandoffTelemetryStartedMs = 0;\n\tg_rfChHandoffWaitReason = RF_RECOVERY_WAIT_NONE;\n''',
+                       '''\tg_rfChHandoffManualImmediate = false;\n\tg_rfChHandoffTelemetryElapsedMs = 0;\n\tg_rfChHandoffTelemetryLastMs = 0;\n\tg_rfChHandoffWaitReason = RF_RECOVERY_WAIT_NONE;\n''')
+
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''\tg_rfChHandoffMask = mask;\n\tg_rfChHandoffStartedMs = now;\n\tg_rfChHandoffTelemetryStartedMs = now;\n\tg_rfChHandoffPhaseMs = now;\n''',
+                       '''\tg_rfChHandoffMask = mask;\n\tg_rfChHandoffStartedMs = now;\n\tg_rfChHandoffTelemetryElapsedMs = 0;\n\tg_rfChHandoffTelemetryLastMs = (uint32_t)now;\n\tg_rfChHandoffPhaseMs = now;\n''')
+
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''static void rfChannelGroupHandoffTask(unsigned long now)\n{\n\tif (!g_rfChGroupActive)\n\t\treturn;\n\n\tif (g_rfChGroupPhase == RF_GROUP_HOP_PENDING) {\n''',
+                       '''static void rfChannelGroupHandoffTask(unsigned long now)\n{\n\tif (!g_rfChGroupActive)\n\t\treturn;\n\n\tg_rfChHandoffTelemetryElapsedMs +=\n\t\t(uint32_t)((uint32_t)now - g_rfChHandoffTelemetryLastMs);\n\tg_rfChHandoffTelemetryLastMs = (uint32_t)now;\n\n\tif (g_rfChGroupPhase == RF_GROUP_HOP_PENDING) {\n''')
+
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''\tif (status->handoffPhase != RF_RECOVERY_HANDOFF_IDLE)\n\t\tstatus->handoffElapsedMs =\n\t\t\t(uint32_t)(millis() - g_rfChHandoffTelemetryStartedMs);\n''',
+                       '''\tif (status->handoffPhase != RF_RECOVERY_HANDOFF_IDLE)\n\t\tstatus->handoffElapsedMs = g_rfChHandoffTelemetryElapsedMs;\n''')
+
+          replace_once('OpenPuck/webusb_config.cpp',
+                       '''\t// diagnostics + 4 bytes full-width handoff elapsed time.\n\tstatic uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 +\n\t\t\t 5 + 3 + 4];\n''',
+                       '''\t// diagnostics + 8 bytes full-width handoff elapsed time.\n\tstatic uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 +\n\t\t\t 5 + 3 + 8];\n''')
+          replace_once('OpenPuck/webusb_config.cpp',
+                       '''\t*q++ = (uint8_t)status.handoffElapsedMs;\n\t*q++ = (uint8_t)(status.handoffElapsedMs >> 8);\n\t*q++ = (uint8_t)(status.handoffElapsedMs >> 16);\n\t*q++ = (uint8_t)(status.handoffElapsedMs >> 24);\n\tif (tud_vendor_write_available() < sizeof f)\n''',
+                       '''\tfor (uint8_t shift = 0; shift < 64u; shift += 8u)\n\t\t*q++ = (uint8_t)(status.handoffElapsedMs >> shift);\n\tif (tud_vendor_write_available() < sizeof f)\n''')
+
+          replace_once('docs/index.html',
+                       '''  const hopElapsed=p.length>=handoffElapsedBase+4?\n    ((p[handoffElapsedBase]|(p[handoffElapsedBase+1]<<8)|(p[handoffElapsedBase+2]<<16)|(p[handoffElapsedBase+3]<<24))>>>0):hopElapsed16;\n''',
+                       '''  let hopElapsed=hopElapsed16;\n  if(p.length>=handoffElapsedBase+8){\n    const lo=((p[handoffElapsedBase]|(p[handoffElapsedBase+1]<<8)|(p[handoffElapsedBase+2]<<16)|(p[handoffElapsedBase+3]<<24))>>>0);\n    const hi=((p[handoffElapsedBase+4]|(p[handoffElapsedBase+5]<<8)|(p[handoffElapsedBase+6]<<16)|(p[handoffElapsedBase+7]<<24))>>>0);\n    hopElapsed=hi*4294967296+lo;\n  }\n''')
+          PY
+      - name: Format only touched C/C++ files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+          clang-format-18 -i \
+            OpenPuck/rf_link.cpp \
+            OpenPuck/rf_link.h \
+            OpenPuck/webusb_config.cpp
+          git diff --check
+      - name: Commit uint64 telemetry patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add OpenPuck/rf_link.cpp OpenPuck/rf_link.h OpenPuck/webusb_config.cpp docs/index.html
+          git commit -m 'RF recovery: widen handoff elapsed telemetry'
+          git push origin HEAD:rf-recovery-journal-persist-stage
