@@ -22,6 +22,7 @@ jobs:
         run: |
           set -eu
           python3 tools/f27_g5_integrate.py
+          python3 tools/f27_g5_re_refresh.py
 
       - name: Install clang-format
         run: |
@@ -41,11 +42,18 @@ jobs:
           grep -q 'static_assert(sizeof JOYCON2_CFG_BODY == 71' OpenPuck/mode_joycon2.cpp
           grep -q '#define MODE_JOYCON2 13' OpenPuck/config.h
           grep -q 'case 0x08:' OpenPuck/mode_joycon2.cpp
+          grep -q 'ackHeader(reply, 0x08, cmd\[2\], sub)' OpenPuck/mode_joycon2.cpp
           grep -q '0x7e, 0x05, 0x68, 0x20' OpenPuck/mode_joycon2.cpp
           grep -q 'JC2_NATIVE_REPORT 0x07' OpenPuck/mode_joycon2.cpp
           grep -q 'JC2_NATIVE_REPORT 0x08' OpenPuck/mode_joycon2.cpp
+          grep -q '0x01, 0x00, 0x0e, JC2_CONTROLLER_TYPE' OpenPuck/mode_joycon2.cpp
+          grep -q '0xff, 0xff, 0xff, 0xff' OpenPuck/mode_joycon2.cpp
+          grep -q 'return (uint8_t)((level << 2) | 0x01)' OpenPuck/mode_joycon2.cpp
           grep -q 'USBDevice.setConfigurationMaxPower(500)' OpenPuck/mode_joycon2.cpp
           ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'JOYCON2_VENDOR_PROTOCOL' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'PAIR_PUBLIC' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'primaryCal' OpenPuck/mode_joycon2.cpp
           ! grep -q '0x09.*native' OpenPuck/mode_joycon2.cpp
           ! grep -Eq 'TUSB_CLASS_AUDIO|audioOut|audioIn|AUDIO_' OpenPuck/mode_joycon2.cpp
           grep -q 'run: pip install adafruit-nrfutil intelhex' .github/workflows/f27-joycon2-g5-clean.yml
@@ -98,13 +106,18 @@ jobs:
           test -z "$(git diff --name-only --diff-filter=U)"
           git diff --check
           python3 tools/f27_g5_integrate.py
+          python3 tools/f27_g5_re_refresh.py
           make format
           make check
           git diff --check
           test ! -e OpenPuck/mode_switch2_pro.cpp
           grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
           grep -q '#define MODE_JOYCON2 13' OpenPuck/config.h
+          grep -q 'ackHeader(reply, 0x08, cmd\[2\], sub)' OpenPuck/mode_joycon2.cpp
           grep -q '0x7e, 0x05, 0x68, 0x20' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'JOYCON2_VENDOR_PROTOCOL' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'PAIR_PUBLIC' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'primaryCal' OpenPuck/mode_joycon2.cpp
 
       - name: Build Makerdiary clean JCR
         run: |
@@ -168,7 +181,7 @@ jobs:
           source_commit=${{ github.sha }}
           upstream_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
           switch2pro_source_dependency=NONE
-          usb_source=ndeadly/switch2_controller_research@d1c5a7f7ba298f83017fae84952a4e6d2ef8fc92 descriptors.md
+          usb_source=ndeadly/switch2_controller_research@d1c5a7f7ba298f83017fae84952a4e6d2ef8fc92 descriptors.md+hid_reports.md+commands.md
           protocol_crosscheck_1=novakpetya/linux-switch2@8b2611dab6e7db853264930749967a5b2bde6896
           protocol_crosscheck_2=martin-bts/hid-switch2-dkms@61f16e00cb71f51d4b1b29d893438097de2839be
           physical_usb_r=057e:2066
@@ -179,9 +192,13 @@ jobs:
           hid_native_r=0x08
           hid_native_l=0x07
           hid_output=0x01
+          firmware_info=observed Joy-Con 1.0.14; controller type side-specific; DSP unavailable
           charging_grip_command=0x08
+          charging_grip_reply_header=00f8 ACK as captured
           charging_grip_reported_vidpid=057e:2068
           charging_grip_serial=HDL50003485519
+          factory_stick_calibration=unknown for side-specific Joy-Con; returns erased FF rather than Pro2 sample
+          device_level_vendor_control=disabled; no published Joy-Con USB evidence, avoids Pro2 blob reuse
           g5_forces_mode=13 for deterministic hardware enumeration
           hardware_success_criterion=clean Joy-Con side enumeration and in-game role behavior; HOME-only behavior is insufficient
           EOF
