@@ -1,0 +1,104 @@
+name: F27 Joy-Con2 rebuild S0 clean-main control
+
+on:
+  push:
+    branches:
+      - f27-jc2-rebuild-s0-clean-main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out clean-main control
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Apply Makerdiary build-only patch
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD^)" = "29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d" || true
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+
+      - name: Verify S0 has no Joy-Con rebuild runtime
+        run: |
+          set -eu
+          ! test -f OpenPuck/mode_joycon2_rebuild.cpp
+          ! grep -R -q 'MODE_JOYCON2_REBUILD' OpenPuck
+          ! grep -q 'tud_descriptor_device_cb' Makefile
+          echo 'S0 clean-main runtime guard PASS'
+
+      - name: Build Makerdiary S0 control
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-JC2-S0-${short}" ./gen_version.sh
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-JC2-S0-CleanMain-MDK.uf2
+
+      - name: Validate S0 UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct
+          p=Path('build/mdk/OpenPuck-F27-JC2-S0-CleanMain-MDK.uf2')
+          data=p.read_bytes()
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          seen=[]; total=None; fam=None
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no)
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data))
+          PY
+
+      - name: Record S0 manifest
+        run: |
+          sha256sum build/mdk/OpenPuck-F27-JC2-S0-CleanMain-MDK.uf2 > build/mdk/F27-JC2-S0-CleanMain.manifest.txt
+          printf '%s\n' \
+            'source_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d' \
+            'runtime_delta=NONE (clean current-main control)' \
+            'build_only_patch=96721b9bf50fbb92fc956853b8ef73dcf2ae973c' \
+            'hardware_question=does clean current-main MDK remain booted and stably enumerate on the same OpenPuck?' \
+            >> build/mdk/F27-JC2-S0-CleanMain.manifest.txt
+
+      - name: Upload S0
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-JC2-S0-CleanMain
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-JC2-S0-CleanMain-MDK.uf2
+            build/mdk/F27-JC2-S0-CleanMain.manifest.txt
