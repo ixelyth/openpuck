@@ -1,0 +1,14 @@
+# Keep the experiment marker in the linked image without changing runtime USB
+# behavior. The empty compiler barrier creates a live reference from beginPool,
+# preventing --gc-sections from discarding the otherwise-unreferenced string.
+marked = MODE.read_text(encoding="utf-8")
+old = "void Switch2ProController::beginPool()\n{\n"
+new = (
+    "void Switch2ProController::beginPool()\n{\n"
+    "\tasm volatile(\"\" : : \"r\"(M15_BUILD_MARKER) : \"memory\");\n"
+)
+if marked.count(old) != 1:
+    raise SystemExit(f"M15 marker-retain: beginPool anchor count {marked.count(old)}, expected 1")
+marked = marked.replace(old, new, 1)
+MODE.write_text(marked, encoding="utf-8")
+print("F27-M15 binary marker retained through beginPool reference")
