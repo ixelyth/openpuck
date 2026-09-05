@@ -42,6 +42,14 @@ if "F27-M18-DUAL-LEGACY-SWPRO" in src:
 
 src = replace_once(
     src,
+    "SwitchProController g_switchPro;\n",
+    "SwitchProController g_switchPro;\n"
+    "static const char M18_BUILD_MARKER[] = \"F27-M18-DUAL-LEGACY-SWPRO\";\n",
+    "binary experiment marker",
+)
+
+src = replace_once(
+    src,
     "static void jcRumble(uint8_t slot, const uint8_t *p, uint16_t pn)\n"
     "{\n"
     "\tif (pn < 9)\n"
@@ -56,6 +64,20 @@ src = replace_once(
     "\tif (pn < 9)\n"
     "\t\treturn; // [timer][left rumble x4][right rumble x4]\n",
     "suppress companion rumble",
+)
+
+src = replace_once(
+    src,
+    "void SwitchProController::beginPool()\n"
+    "{\n"
+    "\tjcBuildStickCal();\n",
+    "void SwitchProController::beginPool()\n"
+    "{\n"
+    "\t// Keep the experiment identity in the linked image without changing\n"
+    "\t// runtime behavior; the empty asm only creates a linker reference.\n"
+    "\tasm volatile(\"\" : : \"r\"(M18_BUILD_MARKER) : \"memory\");\n"
+    "\tjcBuildStickCal();\n",
+    "retain binary experiment marker",
 )
 
 src = replace_once(
