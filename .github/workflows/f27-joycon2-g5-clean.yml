@@ -1,0 +1,205 @@
+name: F27-G5 clean Joy-Con 2 L-R plus Charging Grip
+
+on:
+  push:
+    branches:
+      - f27-joycon2-g5-clean-jcr-grip
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out clean G5 branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compose minimal Joy-Con mode plumbing
+        run: |
+          set -eu
+          python3 tools/f27_g5_integrate.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify clean G5 source
+        run: |
+          set -eu
+          make format
+          make check
+          git diff --check
+          test ! -e OpenPuck/mode_switch2_pro.cpp
+          test ! -e OpenPuck/mode_switch2_pro.h
+          grep -q 'F27-G5 deliberately starts from upstream OpenPuck' OpenPuck/mode_joycon2.cpp
+          grep -q 'static_assert(sizeof JOYCON2_HID_DESC == 100' OpenPuck/mode_joycon2.cpp
+          grep -q 'static_assert(sizeof JOYCON2_CFG_BODY == 71' OpenPuck/mode_joycon2.cpp
+          grep -q '#define MODE_JOYCON2 13' OpenPuck/config.h
+          grep -q 'case 0x08:' OpenPuck/mode_joycon2.cpp
+          grep -q '0x7e, 0x05, 0x68, 0x20' OpenPuck/mode_joycon2.cpp
+          grep -q 'JC2_NATIVE_REPORT 0x07' OpenPuck/mode_joycon2.cpp
+          grep -q 'JC2_NATIVE_REPORT 0x08' OpenPuck/mode_joycon2.cpp
+          grep -q 'USBDevice.setConfigurationMaxPower(500)' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
+          ! grep -q '0x09.*native' OpenPuck/mode_joycon2.cpp
+          ! grep -qi 'audio' OpenPuck/mode_joycon2.cpp
+          grep -q 'pip install adafruit-nrfutil intelhex' .github/workflows/f27-joycon2-g5-clean.yml
+          ! grep -Eq 'adafruit-nrfutil==|intelhex==' .github/workflows/f27-joycon2-g5-clean.yml
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard clean JCR
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-G5-JCR-${short}" ./gen_version.sh
+          mkdir -p build/g5-r build/cache/g5-r
+          make build BUILD_PATH=build/cache/g5-r OUTPUT_DIR=build/g5-r EXTRA_FLAGS="-DOPK_G5_FORCE_JOYCON2=1 -DOPK_G5_JOYCON_SIDE=2"
+          ./gen_uf2.sh build/g5-r/OpenPuck.ino.hex build/g5-r/OpenPuck-F27-G5-Clean-JCR-Grip08-standard.uf2
+          cp build/g5-r/OpenPuck-F27-G5-Clean-JCR-Grip08-standard.uf2 /tmp/
+          cp build/g5-r/OpenPuck.ino.hex /tmp/OpenPuck-F27-G5-JCR.hex
+
+      - name: Build standard clean JCL
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          rm -f OpenPuck/git_version.h
+          OPK_BUILD_VERSION="F27-G5-JCL-${short}" ./gen_version.sh
+          mkdir -p build/g5-l build/cache/g5-l
+          make build BUILD_PATH=build/cache/g5-l OUTPUT_DIR=build/g5-l EXTRA_FLAGS="-DOPK_G5_FORCE_JOYCON2=1 -DOPK_G5_JOYCON_SIDE=1"
+          ./gen_uf2.sh build/g5-l/OpenPuck.ino.hex build/g5-l/OpenPuck-F27-G5-Clean-JCL-Grip08-standard.uf2
+          cp build/g5-l/OpenPuck-F27-G5-Clean-JCL-Grip08-standard.uf2 /tmp/
+          cp build/g5-l/OpenPuck.ino.hex /tmp/OpenPuck-F27-G5-JCL.hex
+
+      - name: Compose Makerdiary MDK support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          python3 tools/f27_g5_integrate.py
+          make format
+          make check
+          git diff --check
+          test ! -e OpenPuck/mode_switch2_pro.cpp
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q '#define MODE_JOYCON2 13' OpenPuck/config.h
+          grep -q '0x7e, 0x05, 0x68, 0x20' OpenPuck/mode_joycon2.cpp
+
+      - name: Build Makerdiary clean JCR
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-G5-JCR-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_G5_FORCE_JOYCON2=1 -DOPK_G5_JOYCON_SIDE=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-G5-Clean-JCR-Grip08-MDK.uf2
+          cp build/mdk/OpenPuck-F27-G5-Clean-JCR-Grip08-MDK.uf2 /tmp/
+          cp build/mdk/OpenPuck.ino.hex /tmp/OpenPuck-F27-G5-JCR-MDK.hex
+
+      - name: Build Makerdiary clean JCL
+        run: |
+          set -eu
+          rm -rf build/mdk build/cache/mdk
+          short="${GITHUB_SHA::8}"
+          rm -f OpenPuck/git_version.h
+          OPK_BUILD_VERSION="F27-G5-JCL-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_G5_FORCE_JOYCON2=1 -DOPK_G5_JOYCON_SIDE=1"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-G5-Clean-JCL-Grip08-MDK.uf2
+          cp /tmp/OpenPuck-F27-G5-Clean-JCR-Grip08-MDK.uf2 build/mdk/
+          mkdir -p build/g5-r build/g5-l
+          cp /tmp/OpenPuck-F27-G5-Clean-JCR-Grip08-standard.uf2 build/g5-r/
+          cp /tmp/OpenPuck-F27-G5-Clean-JCL-Grip08-standard.uf2 build/g5-l/
+
+      - name: Validate G5 artifacts
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, os
+          sha=os.environ['GITHUB_SHA'][:8]
+          checks=[
+            ('build/g5-r/OpenPuck-F27-G5-Clean-JCR-Grip08-standard.uf2', b'F27-G5-CLEAN-JCR-GRIP08', b'Joy-Con 2 (R)', ('F27-G5-JCR-'+sha).encode()),
+            ('build/g5-l/OpenPuck-F27-G5-Clean-JCL-Grip08-standard.uf2', b'F27-G5-CLEAN-JCL-GRIP08', b'Joy-Con 2 (L)', ('F27-G5-JCL-'+sha).encode()),
+            ('build/mdk/OpenPuck-F27-G5-Clean-JCR-Grip08-MDK.uf2', b'F27-G5-CLEAN-JCR-GRIP08', b'Joy-Con 2 (R)', ('F27-G5-JCR-'+sha).encode()),
+            ('build/mdk/OpenPuck-F27-G5-Clean-JCL-Grip08-MDK.uf2', b'F27-G5-CLEAN-JCL-GRIP08', b'Joy-Con 2 (L)', ('F27-G5-JCL-'+sha).encode()),
+          ]
+          grip=b'HDL50003485519'
+          pro=b'Switch 2 Pro Controller'
+          for path, marker, product, build in checks:
+              data=Path(path).read_bytes(); image=bytearray(); seen=[]; total=None; fam=None
+              if len(data)%512: raise SystemExit(path+': bad UF2 length')
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit(path+': bad magic')
+                  total=nblocks if total is None else total; fam=family if fam is None else fam
+                  if nblocks!=total or family!=fam: raise SystemExit(path+': metadata mismatch')
+                  seen.append(no)
+                  if addr>=0x26000: image += b[32:32+size]
+              if seen != list(range(total)): raise SystemExit(path+': nonsequential UF2')
+              for needle,label in [(marker,'G5 marker'),(product,'product'),(build,'build marker'),(grip,'grip serial')]:
+                  if needle not in image: raise SystemExit(path+': missing '+label)
+              if pro in image: raise SystemExit(path+': Pro2 product contamination')
+              print(path,'PASS','blocks',total,'family',hex(fam))
+          PY
+
+      - name: Record G5 manifest
+        run: |
+          cat > build/F27-G5-Clean-JoyCon2-Grip08.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          upstream_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          switch2pro_source_dependency=NONE
+          usb_source=ndeadly/switch2_controller_research@d1c5a7f7ba298f83017fae84952a4e6d2ef8fc92 descriptors.md
+          protocol_crosscheck_1=novakpetya/linux-switch2@8b2611dab6e7db853264930749967a5b2bde6896
+          protocol_crosscheck_2=martin-bts/hid-switch2-dkms@61f16e00cb71f51d4b1b29d893438097de2839be
+          physical_usb_r=057e:2066
+          physical_usb_l=057e:2067
+          usb_interfaces=2 (HID interrupt plus Nintendo vendor bulk)
+          audio_interfaces=0
+          hid_common_report=0x05
+          hid_native_r=0x08
+          hid_native_l=0x07
+          hid_output=0x01
+          charging_grip_command=0x08
+          charging_grip_reported_vidpid=057e:2068
+          charging_grip_serial=HDL50003485519
+          g5_forces_mode=13 for deterministic hardware enumeration
+          hardware_success_criterion=clean Joy-Con side enumeration and in-game role behavior; HOME-only behavior is insufficient
+          EOF
+          sha256sum build/g5-r/OpenPuck-F27-G5-Clean-JCR-Grip08-standard.uf2 >> build/F27-G5-Clean-JoyCon2-Grip08.manifest.txt
+          sha256sum build/g5-l/OpenPuck-F27-G5-Clean-JCL-Grip08-standard.uf2 >> build/F27-G5-Clean-JoyCon2-Grip08.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-G5-Clean-JCR-Grip08-MDK.uf2 >> build/F27-G5-Clean-JoyCon2-Grip08.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-G5-Clean-JCL-Grip08-MDK.uf2 >> build/F27-G5-Clean-JoyCon2-Grip08.manifest.txt
+
+      - name: Upload G5
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-G5-Clean-JoyCon2-Grip08
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/g5-r/OpenPuck-F27-G5-Clean-JCR-Grip08-standard.uf2
+            build/g5-l/OpenPuck-F27-G5-Clean-JCL-Grip08-standard.uf2
+            build/mdk/OpenPuck-F27-G5-Clean-JCR-Grip08-MDK.uf2
+            build/mdk/OpenPuck-F27-G5-Clean-JCL-Grip08-MDK.uf2
+            build/F27-G5-Clean-JoyCon2-Grip08.manifest.txt
