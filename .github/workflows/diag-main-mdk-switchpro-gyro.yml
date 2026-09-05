@@ -1,0 +1,197 @@
+name: Clean main plus MDK Switch Pro gyro control
+
+on:
+  push:
+    branches:
+      - diag-main-mdk-switchpro-gyro-clean
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out control branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Reset workspace to exact current main
+        run: |
+          set -eu
+          MAIN=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          git reset --hard "$MAIN"
+          git clean -fdx
+          test "$(git rev-parse HEAD)" = "$MAIN"
+          test -z "$(git status --porcelain)"
+          grep -q 'if (g_usbMode == MODE_SW_PRO) {' OpenPuck/haptics.cpp
+          ! grep -q 'MODE_SW2_PRO' OpenPuck/haptics.cpp
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Intentionally unpinned per current OpenPuck build policy.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build pristine-main standard reference
+        run: |
+          set -eu
+          OPK_BUILD_VERSION="MAIN-MDK-CONTROL-29f4d1e8" ./gen_version.sh
+          cp OpenPuck/git_version.h /tmp/main-git_version.h
+          mkdir -p build/main-standard build/cache/main-standard
+          make build BUILD_PATH=build/cache/main-standard OUTPUT_DIR=build/main-standard
+          cp build/main-standard/OpenPuck.ino.hex /tmp/pristine-main.hex
+          sha256sum /tmp/pristine-main.hex
+
+      - name: Restore pristine main before MDK patch
+        run: |
+          set -eu
+          MAIN=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          git reset --hard "$MAIN"
+          git clean -fdx
+          test -z "$(git status --porcelain)"
+
+      - name: Apply only Makerdiary MDK patch
+        run: |
+          set -eu
+          MAIN=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          test "$(git rev-parse HEAD)" = "$MAIN"
+          cat > /tmp/expected-mdk-files <<'EOF'
+          .github/workflows/build.yml
+          .github/workflows/release.yml
+          Makefile
+          OpenPuck/OpenPuck.ino
+          OpenPuck/board_config.h
+          OpenPuck/fault_diag.cpp
+          OpenPuck/status_led.cpp
+          bootloader/makerdiary/0001-Makerdiary-reset-UICR.patch
+          bootloader/makerdiary/0002-OpenPuck-app-handoff.patch
+          bootloader/makerdiary/README.md
+          bootloader/makerdiary/build_mdk_bootloader.sh
+          bootloader/makerdiary/flash_mdk_bootloader.sh
+          docs/index.html
+          tools/make_mdk_first_install.py
+          tools/verify_mdk_bootloader_hex.py
+          EOF
+          git diff --cached --name-only | sort > /tmp/actual-mdk-files
+          sort /tmp/expected-mdk-files -o /tmp/expected-mdk-files
+          diff -u /tmp/expected-mdk-files /tmp/actual-mdk-files
+          orig="$(git show "$MDK" --pretty=format: | git patch-id --stable | awk '{print $1}')"
+          rebased="$(git diff --cached | git patch-id --stable | awk '{print $1}')"
+          echo "original_patch_id=$orig"
+          echo "rebased_patch_id=$rebased"
+          test -n "$orig"
+          test "$orig" = "$rebased"
+          git diff --cached --check
+          git diff --quiet "$MAIN" -- OpenPuck/haptics.cpp
+          grep -q 'if (g_usbMode == MODE_SW_PRO) {' OpenPuck/haptics.cpp
+          ! grep -q 'MODE_SW2_PRO' OpenPuck/haptics.cpp
+
+      - name: Prove MDK patch is inert for ordinary build
+        run: |
+          set -eu
+          cp /tmp/main-git_version.h OpenPuck/git_version.h
+          mkdir -p build/post-mdk-standard build/cache/post-mdk-standard
+          make build BUILD_PATH=build/cache/post-mdk-standard OUTPUT_DIR=build/post-mdk-standard
+          cmp /tmp/pristine-main.hex build/post-mdk-standard/OpenPuck.ino.hex
+          sha256sum /tmp/pristine-main.hex build/post-mdk-standard/OpenPuck.ino.hex
+
+      - name: Build Makerdiary MDK control
+        run: |
+          set -eu
+          cp /tmp/main-git_version.h OpenPuck/git_version.h
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Main29f4-MDK-SwitchPro-Gyro-Control.uf2
+
+      - name: Validate MDK UF2
+        run: |
+          set -eu
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          path = Path('build/mdk/OpenPuck-Main29f4-MDK-SwitchPro-Gyro-Control.uf2')
+          data = path.read_bytes()
+          if len(data) % 512:
+              raise SystemExit('non-UF2 length')
+          total = family = None
+          seen = []
+          image = bytearray()
+          addrs = []
+          for off in range(0, len(data), 512):
+              b = data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,fam = struct.unpack_from('<IIIIIIII', b, 0)
+              if (m0,m1) != (0x0A324655,0x9E5D5157):
+                  raise SystemExit('bad UF2 magic')
+              if size > 476:
+                  raise SystemExit('bad payload size')
+              total = nblocks if total is None else total
+              family = fam if family is None else family
+              if nblocks != total or fam != family:
+                  raise SystemExit('inconsistent UF2 metadata')
+              seen.append(no)
+              if addr >= 0x26000:
+                  image += b[32:32+size]
+                  addrs.append(addr)
+          if seen != list(range(total)):
+              raise SystemExit('non-sequential blocks')
+          if family != 0xADA52840:
+              raise SystemExit(f'wrong family {family:#x}')
+          if b'MAIN-MDK-CONTROL-29f4d1e8' not in image:
+              raise SystemExit('missing clean-main build label')
+          print('PASS', 'blocks', total, 'range', hex(min(addrs)), hex(max(addrs)+256), 'size', len(data))
+          PY
+
+      - name: Record control manifest
+        run: |
+          set -eu
+          MAIN=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          orig="$(git show "$MDK" --pretty=format: | git patch-id --stable | awk '{print $1}')"
+          cat > build/mdk/Main29f4-MDK-SwitchPro-Gyro-Control.manifest.txt <<EOF
+          purpose=clean current main plus only Makerdiary MDK patch; legacy Switch Pro + gyro hardware control
+          main_commit=$MAIN
+          main_tree=69a788e001ce40e7e3a8a546dd1929e04d26fdfb
+          mdk_patch_commit=$MDK
+          mdk_patch_id=$orig
+          pr249_switch_pro_raw_imu_reconnect=present unchanged from main
+          switch2pro_experimental_code=absent
+          joycon_experimental_code=absent
+          rf_reconciliation_experimental_layers=absent
+          ordinary_standard_hex_byte_identical_before_after_mdk_patch=PASS
+          EOF
+          sha256sum /tmp/pristine-main.hex >> build/mdk/Main29f4-MDK-SwitchPro-Gyro-Control.manifest.txt
+          sha256sum build/post-mdk-standard/OpenPuck.ino.hex >> build/mdk/Main29f4-MDK-SwitchPro-Gyro-Control.manifest.txt
+          sha256sum build/mdk/OpenPuck.ino.hex >> build/mdk/Main29f4-MDK-SwitchPro-Gyro-Control.manifest.txt
+          sha256sum build/mdk/OpenPuck-Main29f4-MDK-SwitchPro-Gyro-Control.uf2 >> build/mdk/Main29f4-MDK-SwitchPro-Gyro-Control.manifest.txt
+          cat build/mdk/Main29f4-MDK-SwitchPro-Gyro-Control.manifest.txt
+
+      - name: Upload clean control package
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-Main29f4-MDK-SwitchPro-Gyro-Control
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-Main29f4-MDK-SwitchPro-Gyro-Control.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/mdk/Main29f4-MDK-SwitchPro-Gyro-Control.manifest.txt
+            build/post-mdk-standard/OpenPuck.ino.hex
