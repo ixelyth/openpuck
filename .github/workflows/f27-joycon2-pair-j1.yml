@@ -1,0 +1,218 @@
+name: F27-J1 clean Joy-Con 2 L+R pair registration
+
+on:
+  push:
+    branches:
+      - f27-joycon2-pair-j1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out J1
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify branch scope
+        run: |
+          set -eu
+          BASE=9f5435f013d2ca06eab8fa8c9908bcb8e21325b9
+          test "$(git merge-base HEAD "$BASE")" = "$BASE"
+          git diff --name-only "$BASE"..HEAD | sort > /tmp/j1-branch-files
+          cat /tmp/j1-branch-files
+          test "$(wc -l < /tmp/j1-branch-files)" -eq 2
+          grep -qx '.github/workflows/f27-joycon2-pair-j1.yml' /tmp/j1-branch-files
+          grep -qx 'tools/f27_joycon2_pair_j1.py' /tmp/j1-branch-files
+
+      - name: Recover pinned dual-session and Joy-Con helpers
+        run: |
+          set -eu
+          M15=b6bce4d387433372f480593bd28de506ff0b5368
+          JOY=1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          git fetch origin "$M15" "$JOY"
+          mkdir -p tools/f27_m15_parts
+          git show "$M15":tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show "$M15":tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show "$JOY":OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show "$JOY":OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+
+      - name: Apply clean J1 composition
+        run: |
+          set -eu
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_joycon2_pair_j1.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify J1 source
+        run: |
+          set -eu
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h OpenPuck/mode_switch2_pro.cpp | sort)"
+          grep -q 'F27-J1-JCL-JCR-PAIR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'block\[pid - address\] = g_sw2SessionCtx ? 0x67 : 0x66' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'Joy-Con 2 (L)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'rid = 0x07' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'rid = 0x08' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'f27JoyconBuildSideNative' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'bool requestedMouse = false' OpenPuck/f27_joycon2.cpp
+          grep -q 'if (b & TB_LB)' OpenPuck/f27_joycon2.cpp
+          grep -q 'if (b & TB_RB)' OpenPuck/f27_joycon2.cpp
+          ! grep -q 'F27-M22-HIDDEN-JCR-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard J1 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-J1-JCLJCR-${short}" ./gen_version.sh
+          mkdir -p build/j1-standard build/cache/j1-standard
+          make build BUILD_PATH=build/cache/j1-standard OUTPUT_DIR=build/j1-standard EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/j1-standard/OpenPuck.ino.hex build/j1-standard/OpenPuck-F27-J1-JoyCon2-LR-Pair-standard.uf2
+          cp build/j1-standard/OpenPuck-F27-J1-JoyCon2-LR-Pair-standard.uf2 /tmp/
+          cp build/j1-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-J1-standard.hex
+
+      - name: Compose Makerdiary MDK support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          MDK=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Recompose J1 over Makerdiary build
+        run: |
+          set -eu
+          M15=b6bce4d387433372f480593bd28de506ff0b5368
+          JOY=1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          git fetch origin "$M15" "$JOY"
+          mkdir -p tools/f27_m15_parts
+          git show "$M15":tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show "$M15":tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show "$JOY":OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show "$JOY":OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_joycon2_pair_j1.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-J1-JCL-JCR-PAIR' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Build Makerdiary MDK J1 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-J1-JCLJCR-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-J1-JoyCon2-LR-Pair-MDK.uf2
+          mkdir -p build/j1-standard
+          cp /tmp/OpenPuck-F27-J1-JoyCon2-LR-Pair-standard.uf2 build/j1-standard/
+          cp /tmp/OpenPuck-F27-J1-standard.hex build/j1-standard/OpenPuck.ino.hex
+
+      - name: Validate J1 artifacts
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, os, hashlib
+          marker=b'F27-J1-JCL-JCR-PAIR'
+          build=("F27-J1-JCLJCR-"+os.environ['GITHUB_SHA'][:8]).encode()
+          paths=[
+              'build/j1-standard/OpenPuck-F27-J1-JoyCon2-LR-Pair-standard.uf2',
+              'build/mdk/OpenPuck-F27-J1-JoyCon2-LR-Pair-MDK.uf2',
+          ]
+          for path in paths:
+              data=Path(path).read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; addrs=[]
+              if len(data)%512: raise SystemExit('bad UF2 length')
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
+                  total=nblocks if total is None else total
+                  fam=family if fam is None else fam
+                  if nblocks!=total or family!=fam: raise SystemExit('metadata mismatch')
+                  seen.append(no); addrs.append(addr)
+                  if addr>=0x26000: image += b[32:32+size]
+              if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+              if fam != 0xADA52840: raise SystemExit('wrong UF2 family')
+              if marker not in image or build not in image: raise SystemExit('missing J1 identity')
+              print(path,'PASS',len(data),total,hashlib.sha256(data).hexdigest())
+          PY
+
+      - name: Record J1 manifest
+        run: |
+          cat > build/F27-J1-JoyCon2-LR-Pair.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          dual_session_scaffold=M15 b6bce4d387433372f480593bd28de506ff0b5368
+          dual_jcr_predecessor=M21 2f990e0f3e9401a734427e23e8223f2b9f1be799
+          branch_base=M23 head 9f5435f013d2ca06eab8fa8c9908bcb8e21325b9; M22/M23 transforms NOT applied
+          session0=Joy-Con2-R factory PID2066 native report08 live right-side ordinary controls
+          session1=Joy-Con2-L factory PID2067 native report07 live left-side ordinary controls
+          session_state=independent M15 active-report/features/pairing-LTK/vendor buffers/endpoints per session
+          controller_identity=distinct controller address and factory serial inherited from M21 for session1
+          shared_ep0=one physical USB address; EP0 logical Joy-Con identity remains hardware-positive JCR path
+          pairing_chord=Steam LB+RB emits Joy-Con L plus Joy-Con R simultaneously
+          mouse=disabled
+          gyro_motion=not added in J1
+          rumble=not part of J1 adjudication
+          gl_gr=not added in J1
+          purpose=determine whether Switch 2 closes the greyed-out JCL/JCR counterpart into one paired controller on one physical OpenPuck USB device
+          EOF
+          sha256sum build/j1-standard/OpenPuck-F27-J1-JoyCon2-LR-Pair-standard.uf2 >> build/F27-J1-JoyCon2-LR-Pair.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-J1-JoyCon2-LR-Pair-MDK.uf2 >> build/F27-J1-JoyCon2-LR-Pair.manifest.txt
+
+      - name: Upload J1 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-J1-JoyCon2-LR-Pair
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/j1-standard/OpenPuck-F27-J1-JoyCon2-LR-Pair-standard.uf2
+            build/j1-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-J1-JoyCon2-LR-Pair-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-J1-JoyCon2-LR-Pair.manifest.txt
