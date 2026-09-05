@@ -481,11 +481,12 @@ static bool webusbSendRfStatus()
 	static RfRecoveryStatus status;
 	rfRecoveryStatusSnapshot(&status);
 	// Append-only trailers after the counted channel rows preserve the v1
-	// header/row offsets: 4 bytes handoff telemetry + 7 bytes journal-builder
-	// status + 1 byte ambient-survey progress + 5 bytes automatic-handoff
-	// admission/retry diagnostics + 3 bytes ambient-survey retry/failure diagnostics.
-	static uint8_t
-		f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 + 5 + 3];
+	// header/row offsets: 4 bytes legacy handoff telemetry + 7 bytes journal-
+	// builder status + 1 byte ambient-survey progress + 5 bytes automatic-
+	// handoff admission/retry diagnostics + 3 bytes ambient-survey retry/failure
+	// diagnostics + 4 bytes full-width handoff elapsed time.
+	static uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 +
+			 5 + 3 + 4];
 	uint8_t *q = f + 2;
 	f[0] = 0xAD;
 	f[1] = (uint8_t)(sizeof f - 2u);
@@ -515,8 +516,12 @@ static bool webusbSendRfStatus()
 		*q++ = entry.recentOrder;
 	}
 	*q++ = status.handoffPhase;
-	*q++ = (uint8_t)status.handoffElapsedMs;
-	*q++ = (uint8_t)(status.handoffElapsedMs >> 8);
+	const uint16_t legacyHandoffElapsedMs =
+		status.handoffElapsedMs > 0xFFFFu ?
+			0xFFFFu :
+			(uint16_t)status.handoffElapsedMs;
+	*q++ = (uint8_t)legacyHandoffElapsedMs;
+	*q++ = (uint8_t)(legacyHandoffElapsedMs >> 8);
 	*q++ = status.handoffOldChannel;
 	*q++ = status.journalBuilderPhase;
 	*q++ = status.journalBuilderIndex;
@@ -534,6 +539,10 @@ static bool webusbSendRfStatus()
 	*q++ = status.ambientSurveyRetry;
 	*q++ = status.ambientSurveyFailure;
 	*q++ = status.ambientSurveyFailureChannel;
+	*q++ = (uint8_t)status.handoffElapsedMs;
+	*q++ = (uint8_t)(status.handoffElapsedMs >> 8);
+	*q++ = (uint8_t)(status.handoffElapsedMs >> 16);
+	*q++ = (uint8_t)(status.handoffElapsedMs >> 24);
 	if (tud_vendor_write_available() < sizeof f)
 		return false;
 	usb_web.write(f, sizeof f);
