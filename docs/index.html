@@ -770,7 +770,7 @@ const RUMBLE_SCALES=[50,75,100,150,200,250,300,400,500];
 }
 
 // ---- RF recovery / journal status ----
-let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfHandoffPhase=0, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false, rfSurveyRetry=0, rfSurveyFailure=0, rfSurveyFailureChannel=0, rfIdleTestBusy=false, rfIdleTestMode=0;
+let rfCapable=false, rfBusy=false, rfLastRefresh=0, rfHopPending=false, rfHandoffActive=false, rfHandoffPhase=0, rfBuilderActive=false, rfBuilderSaving=false, rfBuilderStartPending=false, rfSurveyRunning=false, rfSurveyPending=false, rfSurveyGeneration=0, rfSurveyWatchActive=false, rfSurveyLockActive=false, rfSurveyLockGeneration=0, rfSurveyRetry=0, rfSurveyFailure=0, rfSurveyFailureChannel=0, rfIdleTestBusy=false, rfIdleTestMode=0;
 let rfHopRequestedCh=0, rfHopSawHandoff=false;
 let rfPoolChannels=new Set();
 const RF_DESIG=["unexplored","good","poor","mixed"];
@@ -883,13 +883,14 @@ function applyRfStatus(p){
   if(rfBuilderStartPending&&builderPhase!==0) rfBuilderStartPending=false;
   $("#rfBuilder").textContent=rfBuilderActive?"Cancel Journal Build":rfBuilderStartPending?"Starting…":"Build RF Journal";
   syncRfBuilderDisabled();
-  $("#rfSurvey").disabled=rfBuilderActive||rfIdleTestBusy;
   rfSurveyRunning=running;
   rfSurveyPending=pending;
   rfSurveyGeneration=generation;
   rfSurveyRetry=surveyRetry;
   rfSurveyFailure=surveyFailure;
   rfSurveyFailureChannel=surveyFailureChannel;
+  if(rfSurveyLockActive&&(surveyFailure||(!running&&!pending&&generation!==rfSurveyLockGeneration)))
+    rfSurveyLockActive=false;
   if(rfHopPending&&handoff) rfHopSawHandoff=true;
   if(rfHopPending&&!rfHopRequestedCh&&!handoff) rfHopPending=false;
   const surveyFailureText=["","sample timeout","incomplete scan"];
@@ -906,14 +907,16 @@ function applyRfStatus(p){
     const hopBtn=document.createElement("button");
     hopBtn.textContent=ch===current?"Active":"Hop";
     hopBtn.dataset.rfHop="1";
-    hopBtn.disabled=ch===current||rfHopWorkflowBlocked()||rfHopPending||rfBuilderActive;
+    hopBtn.disabled=ch===current||rfSurveyLockActive||rfHopWorkflowBlocked()||rfHopPending||rfBuilderActive;
     hopBtn.style.padding="4px 8px";
     hopBtn.dataset.rfCurrent=ch===current?"1":"0";
     hopBtn.addEventListener("click",()=>hopRf(ch));
     hopCell.appendChild(hopBtn);
     const startupBtn=document.createElement("button");
     startupBtn.textContent=ch===startup?"Startup ✓":"Startup";
-    startupBtn.disabled=ch===startup;
+    startupBtn.dataset.rfStartup="1";
+    startupBtn.dataset.rfStartupSelected=ch===startup?"1":"0";
+    startupBtn.disabled=rfSurveyLockActive||ch===startup;
     startupBtn.style.cssText="padding:4px 8px;margin-left:6px";
     startupBtn.title="Use this channel on the next boot. This does not mark the channel good.";
     startupBtn.addEventListener("click",()=>manualStartupRf(ch));
@@ -926,6 +929,22 @@ function applyRfStatus(p){
     col.innerHTML=`<div style="font-size:9px;color:#8ba2c4">${noise?'-'+noise:''}</div><div style="width:100%;height:${h}px;background:currentColor;opacity:${noise?'.72':'.18'};border-radius:2px 2px 0 0"></div><div style="font-size:9px;margin-top:2px">${ch}</div>`;
     bars.appendChild(col);
   }
+  syncRfSurveyControls();
+}
+function syncRfSurveyControls(){
+  const locked=rfSurveyLockActive;
+  $("#rfRefresh").disabled=locked;
+  $("#rfSurvey").disabled=locked||rfBuilderActive||rfIdleTestBusy;
+  $("#rfIdleRead").disabled=locked||rfIdleTestBusy;
+  $("#rfIdleSame").disabled=locked||(rfIdleTestBusy&&rfIdleTestMode!==2);
+  $("#rfIdlePlus").disabled=locked||(rfIdleTestBusy&&rfIdleTestMode!==3);
+  for(const tr of $("#rfJournalBody").querySelectorAll("tr")){
+    for(const btn of tr.querySelectorAll("button[data-rf-hop]"))
+      btn.disabled=locked||rfHopPending||rfBuilderActive||btn.dataset.rfCurrent==="1"||rfHopWorkflowBlocked();
+    for(const btn of tr.querySelectorAll("button[data-rf-startup]"))
+      btn.disabled=locked||btn.dataset.rfStartupSelected==="1";
+  }
+  syncRfBuilderDisabled();
 }
 function rfBuilderWorkflowBlocked(){
   if(rfIdleTestBusy) return true;
@@ -941,13 +960,13 @@ function rfHopWorkflowBlocked(){
   return rfHandoffActive;
 }
 function syncRfBuilderDisabled(){
-  $("#rfBuilder").disabled=rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&rfBuilderWorkflowBlocked());
+  $("#rfBuilder").disabled=rfSurveyLockActive||rfBuilderSaving||rfBuilderStartPending||(!rfBuilderActive&&rfBuilderWorkflowBlocked());
 }
 function setRfHopButtonsDisabled(disabled){
   rfHopPending=!!disabled;
   for(const tr of $("#rfJournalBody").querySelectorAll("tr")){
     for(const btn of tr.querySelectorAll("button[data-rf-hop]"))
-      btn.disabled=rfHopPending||rfBuilderActive||btn.dataset.rfCurrent==="1"||rfHopWorkflowBlocked();
+      btn.disabled=rfSurveyLockActive||rfHopPending||rfBuilderActive||btn.dataset.rfCurrent==="1"||rfHopWorkflowBlocked();
   }
   // Keep the Builder interlock synchronized with the local Hop latch as well
   // as firmware handoff state. The terminal status frame arrives before the
@@ -971,7 +990,7 @@ async function waitRfUiIdle(){
   return !!dev&&!rfBusy;
 }
 async function hopRf(ch){
-  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfHopPending||rfBuilderActive||rfHopWorkflowBlocked()) return;
+  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfSurveyLockActive||rfHopPending||rfBuilderActive||rfHopWorkflowBlocked()) return;
   setRfHopButtonsDisabled(true);
   rfHopRequestedCh=ch;
   rfHopSawHandoff=false;
@@ -1016,7 +1035,7 @@ async function hopRf(ch){
 }
 
 async function manualStartupRf(ch){
-  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)) return;
+  if(!dev||isDongle||!rfCapable||!rfPoolChannels.has(ch)||rfSurveyLockActive) return;
   if(!(await waitRfUiIdle())) return;
   rfBusy=true;
   try{
@@ -1028,7 +1047,7 @@ async function manualStartupRf(ch){
   finally{ rfBusy=false; }
 }
 async function manualJournalBuilderRf(){
-  if(!dev||isDongle||!rfCapable||rfBuilderSaving||rfBuilderStartPending) return;
+  if(!dev||isDongle||!rfCapable||rfSurveyLockActive||rfBuilderSaving||rfBuilderStartPending) return;
   if(rfBuilderActive){
     if(!confirm("Cancel the RF Journal Builder? The current safe RF operation will finish, the puck will return to the channel that was active before the build, and the existing saved journal will be preserved.")) return;
     if(!(await waitRfUiIdle())) return;
@@ -1085,12 +1104,20 @@ async function manualJournalBuilderRf(){
   finally{ rfBusy=false; }
 }
 async function manualSurveyRf(){
-  if(!dev||isDongle||!rfCapable||rfSurveyWatchActive) return;
-  $("#rfSurveyState").textContent="requesting…";
+  if(!dev||isDongle||!rfCapable||rfSurveyWatchActive||rfSurveyLockActive) return;
+  rfSurveyLockGeneration=rfSurveyGeneration;
+  rfSurveyLockActive=true;
   rfSurveyWatchActive=true;
-  if(!(await waitRfUiIdle())){ rfSurveyWatchActive=false; return; }
+  syncRfSurveyControls();
+  $("#rfSurveyState").textContent="requesting…";
+  if(!(await waitRfUiIdle())){
+    rfSurveyWatchActive=false;
+    rfSurveyLockActive=false;
+    syncRfSurveyControls();
+    return;
+  }
   rfBusy=true;
-  const startGeneration=rfSurveyGeneration;
+  const startGeneration=rfSurveyLockGeneration;
   let sawSurvey=false, sawStatus=false, terminal=false;
   try{
     await waitIdle(); if(!dev) return;
@@ -1109,6 +1136,7 @@ async function manualSurveyRf(){
         if(rfSurveyFailure){ terminal=true; break; }
         if(!running&&!pending&&generation!==startGeneration){ terminal=true; break; }
         if(!running&&!pending&&!sawSurvey&&i>=2){
+          rfSurveyLockActive=false;
           $("#rfSurveyState").textContent="Survey not started · RF workflow busy";
           terminal=true;
           break;
@@ -1119,14 +1147,22 @@ async function manualSurveyRf(){
     }
     if(!terminal){
       if(rfSurveyRunning||rfSurveyPending) $("#rfSurveyState").textContent=rfSurveyRunning?"Survey still active":"Survey queued";
-      else if(!sawStatus) $("#rfSurveyState").textContent="Survey status unavailable";
+      else if(!sawStatus){
+        rfSurveyLockActive=false;
+        $("#rfSurveyState").textContent="Survey status unavailable";
+      }
     }
     if(sawStatus) rfLastRefresh=Date.now();
   }catch(e){
+    rfSurveyLockActive=false;
     $("#rfSurveyState").textContent="Survey error";
     log("RF survey err: "+e.message);
   }
-  finally{ rfBusy=false; rfSurveyWatchActive=false; }
+  finally{
+    rfBusy=false;
+    rfSurveyWatchActive=false;
+    syncRfSurveyControls();
+  }
 }
 async function refreshRfStatus(survey=false){
   if(!dev||isDongle||!rfCapable||rfBusy) return;
@@ -1141,7 +1177,7 @@ async function refreshRfStatus(survey=false){
 }
 
 async function rfIdleTestAction(field){
-  if(!dev||isDongle||!rfCapable||rfBusy) return;
+  if(!dev||isDongle||!rfCapable||rfBusy||rfSurveyLockActive) return;
   const stopping=rfIdleTestBusy&&((field===103&&rfIdleTestMode===2)||(field===104&&rfIdleTestMode===3));
   rfBusy=true;
   try{
