@@ -281,6 +281,14 @@ static uintptr_t rfChannelJournalFlashUsedEnd()
 	       ((uintptr_t)__data_end__ - (uintptr_t)__data_start__);
 }
 
+// This NOBITS section reserves the fixed journal window in the linker address
+// map without emitting bytes into HEX/UF2. The Makefile pins this section to
+// RF_CHANNEL_JOURNAL_BASE; if linked application data grows into the window,
+// GNU ld rejects the overlap before a firmware artifact can be produced.
+__asm__(".section .rf_journal_guard,\"a\",%nobits\n"
+	".space 8192\n"
+	".previous\n");
+
 struct RfChannelJournalRecord {
 	uint32_t magic;
 	uint32_t sequence;
