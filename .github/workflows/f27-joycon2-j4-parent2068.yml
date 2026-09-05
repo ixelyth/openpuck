@@ -1,0 +1,201 @@
+name: F27-J4 2068 parent over dual Joy-Con 2 L+R
+
+on:
+  push:
+    branches:
+      - f27-joycon2-j4-parent2068-dual-jcljcr
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out J4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Recover pinned dual-session and Joy-Con helpers
+        run: |
+          set -eu
+          M15=b6bce4d387433372f480593bd28de506ff0b5368
+          JOY=1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          git fetch origin "$M15" "$JOY"
+          mkdir -p tools/f27_m15_parts
+          git show "$M15":tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show "$M15":tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show "$JOY":OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show "$JOY":OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+
+      - name: Compose J1 and J4 parent identity
+        run: |
+          set -eu
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_joycon2_pair_j1.py
+          python3 tools/f27_joycon2_pair_j4_parent2068.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify J4 source
+        run: |
+          set -eu
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'F27-J1-JCL-JCR-PAIR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-J4-PARENT2068-JCLJCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'USBDevice.setID(0x057e, 0x2068)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'block\[pid - address\] = g_sw2SessionCtx ? 0x67 : 0x66' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'Joy-Con 2 (L)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'rid = 0x07' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'rid = 0x08' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'bool requestedMouse = false' OpenPuck/f27_joycon2.cpp
+          ! grep -q 'USBDevice.setID(0x057e, 0x2069)' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard J4 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-J4-2068JCLJCR-${short}" ./gen_version.sh
+          mkdir -p build/j4-standard build/cache/j4-standard
+          make build BUILD_PATH=build/cache/j4-standard OUTPUT_DIR=build/j4-standard EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/j4-standard/OpenPuck.ino.hex build/j4-standard/OpenPuck-F27-J4-2068-JCLJCR-standard.uf2
+          cp build/j4-standard/OpenPuck-F27-J4-2068-JCLJCR-standard.uf2 /tmp/
+          cp build/j4-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-J4-standard.hex
+
+      - name: Compose Makerdiary MDK support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          MDK=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Recompose J4 over Makerdiary build
+        run: |
+          set -eu
+          M15=b6bce4d387433372f480593bd28de506ff0b5368
+          JOY=1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          git fetch origin "$M15" "$JOY"
+          mkdir -p tools/f27_m15_parts
+          git show "$M15":tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show "$M15":tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show "$JOY":OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show "$JOY":OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_joycon2_pair_j1.py
+          python3 tools/f27_joycon2_pair_j4_parent2068.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-J4-PARENT2068-JCLJCR' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Build Makerdiary MDK J4 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-J4-2068JCLJCR-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-J4-2068-JCLJCR-MDK.uf2
+          mkdir -p build/j4-standard
+          cp /tmp/OpenPuck-F27-J4-2068-JCLJCR-standard.uf2 build/j4-standard/
+          cp /tmp/OpenPuck-F27-J4-standard.hex build/j4-standard/OpenPuck.ino.hex
+
+      - name: Validate J4 artifacts
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os, struct
+          marker=b'F27-J4-PARENT2068-JCLJCR'
+          j1=b'F27-J1-JCL-JCR-PAIR'
+          build=("F27-J4-2068JCLJCR-"+os.environ['GITHUB_SHA'][:8]).encode()
+          paths=[
+              'build/j4-standard/OpenPuck-F27-J4-2068-JCLJCR-standard.uf2',
+              'build/mdk/OpenPuck-F27-J4-2068-JCLJCR-MDK.uf2',
+          ]
+          for path in paths:
+              data=Path(path).read_bytes(); image=bytearray(); seen=[]; total=None; fam=None
+              if len(data)%512: raise SystemExit(f'bad UF2 length: {path}')
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit(f'bad magic: {path}')
+                  total=nblocks if total is None else total
+                  fam=family if fam is None else fam
+                  if nblocks!=total or family!=fam: raise SystemExit(f'metadata mismatch: {path}')
+                  seen.append(no)
+                  if addr>=0x26000: image += b[32:32+size]
+              if seen != list(range(total)): raise SystemExit(f'nonsequential UF2: {path}')
+              if fam != 0xADA52840: raise SystemExit(f'wrong family: {path}')
+              if marker not in image or j1 not in image or build not in image:
+                  raise SystemExit(f'missing J4 identity marker: {path}')
+              print(path,'PASS',hashlib.sha256(data).hexdigest())
+          PY
+
+      - name: Record J4 manifest
+        run: |
+          cat > build/F27-J4-2068-JCLJCR.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          base=clean J1 dual JCL/JCR pair-registration topology
+          physical_usb_parent=057E:2068
+          session0=Joy-Con2-R factory/logical PID2066 native report08
+          session1=Joy-Con2-L factory/logical PID2067 native report07
+          shared_ep0=one physical USB address; J1 shared control path retained
+          parent_identity_delta=PID only; child/session identities intentionally NOT changed to 2068
+          mouse=disabled as in J1
+          purpose=test whether 2068 parent classification causes Switch 2 to bind the existing same-address JCL+JCR sessions as a complete pair
+          caveat=not a literal USB hub emulation; no undocumented hub descriptor or downstream PHY behavior invented
+          EOF
+          sha256sum build/j4-standard/OpenPuck-F27-J4-2068-JCLJCR-standard.uf2 >> build/F27-J4-2068-JCLJCR.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-J4-2068-JCLJCR-MDK.uf2 >> build/F27-J4-2068-JCLJCR.manifest.txt
+
+      - name: Upload J4 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-J4-2068-JCLJCR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/j4-standard/OpenPuck-F27-J4-2068-JCLJCR-standard.uf2
+            build/j4-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-J4-2068-JCLJCR-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-J4-2068-JCLJCR.manifest.txt
