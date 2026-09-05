@@ -1,0 +1,154 @@
+name: Switch HORIPAD four-clone MDK diagnostic
+
+on:
+  push:
+    branches:
+      - diag-switch-horipad-four-clone-mdk
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out diagnostic branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Reset to exact current-main control base
+        run: |
+          set -eu
+          BASE=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          git reset --hard "$BASE"
+          git clean -fdx
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test -z "$(git status --porcelain)"
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Apply only Makerdiary MDK patch
+        run: |
+          set -eu
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          orig="$(git show "$MDK" --pretty=format: | git patch-id --stable | awk '{print $1}')"
+          applied="$(git diff --cached | git patch-id --stable | awk '{print $1}')"
+          test -n "$orig"
+          test "$orig" = "$applied"
+          git diff --cached --check
+
+      - name: Apply isolated four-clone HORIPAD experiment
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('OpenPuck/mode_switch_hori.cpp')
+          s = p.read_text()
+          old_mount = '''void SwitchHoriController::mountSlots(uint8_t k)\n{\n\tfor (uint8_t u = 0; u < k; u++)\n\t\tUSBDevice.addInterface(g_switch[u]);\n}\n'''
+          new_mount = '''void SwitchHoriController::mountSlots(uint8_t k)\n{\n\t(void)k;\n\t// Diagnostic: always expose the complete four-interface HORIPAD pool. The\n\t// normal dynamic mount map still tracks only real RF-connected bond slots.\n\tfor (uint8_t u = 0; u < maxSlots(); u++)\n\t\tUSBDevice.addInterface(g_switch[u]);\n}\n'''
+          old_task = '''void SwitchHoriController::task()\n{\n\t// stream the 8-byte HORIPAD report at ~250Hz per CONNECTED controller. usbSlot u -> bond slot for input;\n\t// switchBuildHoripad reads g_in[bond] (no per-USB-slot state in the HORIPAD report).\n\tfor (uint8_t u = 0; u < g_usbMountCount; u++) {\n\t\tif (!g_switch[u].ready())\n\t\t\tcontinue;\n\t\tif (millis() - g_swLastMs[u] < USB_STREAM_MS)\n\t\t\tcontinue;\n\t\tint bond = g_usbToBond[u];\n\t\tif (bond < 0)\n\t\t\tcontinue;\n\t\tg_swLastMs[u] = millis();\n\t\tuint8_t p[8];\n\t\tswitchBuildHoripad((uint8_t)bond, p);\n\t\tusbTxHid(&g_switch[u], 0, p,\n\t\t\t sizeof p); // report-id-less descriptor\n\t}\n}\n'''
+          new_task = '''void SwitchHoriController::task()\n{\n\t// Diagnostic: clone the first real mounted bond onto all four pre-existing\n\t// HORIPAD HID interfaces. This changes only USB-slot fan-out; the HORIPAD\n\t// descriptor, VID/PID, report format and physical RF/input source are unchanged.\n\tint bond = -1;\n\tfor (uint8_t u = 0; u < g_usbMountCount; u++) {\n\t\tif (g_usbToBond[u] >= 0) {\n\t\t\tbond = g_usbToBond[u];\n\t\t\tbreak;\n\t\t}\n\t}\n\tif (bond < 0)\n\t\treturn;\n\n\tuint8_t p[8];\n\tswitchBuildHoripad((uint8_t)bond, p);\n\tfor (uint8_t u = 0; u < maxSlots(); u++) {\n\t\tif (!g_switch[u].ready())\n\t\t\tcontinue;\n\t\tif (millis() - g_swLastMs[u] < USB_STREAM_MS)\n\t\t\tcontinue;\n\t\tg_swLastMs[u] = millis();\n\t\tusbTxHid(&g_switch[u], 0, p,\n\t\t\t sizeof p); // report-id-less descriptor\n\t}\n}\n'''
+          if s.count(old_mount) != 1:
+              raise SystemExit('mountSlots anchor mismatch')
+          if s.count(old_task) != 1:
+              raise SystemExit('task anchor mismatch')
+          s = s.replace(old_mount, new_mount).replace(old_task, new_task)
+          p.write_text(s)
+          PY
+          git diff --check
+          test "$(git diff --name-only | grep -c '^OpenPuck/mode_switch_hori.cpp$')" -eq 1
+          grep -q 'USBDevice.setID(0x0F0D, 0x0092)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'USBDevice.setProductDescriptor("POKKEN CONTROLLER")' OpenPuck/mode_switch_hori.cpp
+          grep -q 'static Adafruit_USBD_HID g_switch\[NSLOT\]' OpenPuck/mode_switch_hori.cpp
+          grep -q '#define NSLOT 4' OpenPuck/bonds.h
+          grep -q 'CFG_TUD_HID ?= 6' Makefile
+
+      - name: Generate diagnostic build provenance
+        run: OPK_BUILD_VERSION="HORI4CLONE-MDK-29f4" ./gen_version.sh
+
+      - name: Build Makerdiary MDK diagnostic
+        run: |
+          set -eu
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Switch-HORIPAD-FourClone-MDK.uf2
+
+      - name: Validate MDK UF2 and experiment scope
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          path=Path('build/mdk/OpenPuck-Switch-HORIPAD-FourClone-MDK.uf2')
+          data=path.read_bytes()
+          if len(data)%512: raise SystemExit('non-UF2 length')
+          total=family=None; seen=[]; image=bytearray(); addrs=[]
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,fam=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
+              total=nblocks if total is None else total
+              family=fam if family is None else family
+              if nblocks!=total or fam!=family: raise SystemExit('inconsistent metadata')
+              seen.append(no); addrs.append(addr)
+              if addr>=0x26000: image+=b[32:32+size]
+          if seen!=list(range(total)): raise SystemExit('non-sequential blocks')
+          if family!=0xADA52840: raise SystemExit('wrong family')
+          if b'HORI4CLONE-MDK-29f4' not in image: raise SystemExit('missing build marker')
+          print('PASS',len(data),total,hex(min(addrs)),hex(max(addrs)+256))
+          PY
+          git diff --check
+          git diff -- OpenPuck/mode_switch_hori.cpp > build/mdk/HORIPAD-FourClone.patch
+          test -s build/mdk/HORIPAD-FourClone.patch
+
+      - name: Record diagnostic manifest
+        run: |
+          set -eu
+          BASE=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          cat > build/mdk/HORIPAD-FourClone.manifest.txt <<EOF
+          purpose=legacy Switch HORIPAD same-address four-controller discriminator
+          base_commit=$BASE
+          mdk_patch_commit=$MDK
+          horipad_identity=0F0D:0092 HORI CO.,LTD. / POKKEN CONTROLLER
+          existing_horipad_pool=4 HID interfaces (NSLOT=4)
+          experiment=always mount all four existing HORIPAD HIDs and clone first real live bond report to all four
+          rf_source_count=1 real controller
+          report_format=unchanged 8-byte report-id-less HORIPAD
+          descriptor=unchanged
+          usb_identity=unchanged
+          switch2pro_code=unchanged/not involved
+          reviewer_switch2pro_branch=untouched
+          EOF
+          sha256sum build/mdk/OpenPuck.ino.hex >> build/mdk/HORIPAD-FourClone.manifest.txt
+          sha256sum build/mdk/OpenPuck-Switch-HORIPAD-FourClone-MDK.uf2 >> build/mdk/HORIPAD-FourClone.manifest.txt
+
+      - name: Upload HORIPAD four-clone package
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-Switch-HORIPAD-FourClone-MDK
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-Switch-HORIPAD-FourClone-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/mdk/HORIPAD-FourClone.patch
+            build/mdk/HORIPAD-FourClone.manifest.txt
