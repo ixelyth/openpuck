@@ -26,7 +26,8 @@ src = replace_once(
     "build marker",
 )
 
-helper = r'''struct M22HiddenMouseState {
+# Deliberately non-raw: \t sequences below become real tabs in generated C++.
+helper = '''struct M22HiddenMouseState {
 \tint16_t x;
 \tint16_t y;
 \tint32_t remX;
@@ -130,39 +131,44 @@ src = replace_once(
     "hidden input-enable bypass",
 )
 
-old_hidden_drain = '''\t\tif (s == M15_SW2_JOYCON_R) {
+src = replace_once(
+    src,
+    '''\t\tif (s == M15_SW2_JOYCON_R) {
 \t\t\tif (rid == 0x05)
 \t\t\t\tsw2Build05Neutral((uint8_t)bond, p);
 \t\t\telse {
 \t\t\t\trid = 0x08;
 \t\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);
 \t\t\t}
-'''
-new_hidden_drain = '''\t\tif (s == M15_SW2_JOYCON_R) {
-\t\t\t// Force the unseen companion to the hardware-proven Joy-Con-R
-\t\t\t// native mouse report regardless of host-selected active report.
+''',
+    '''\t\tif (s == M15_SW2_JOYCON_R) {
+\t\t\t// Force the unseen companion to native report 0x08.
 \t\t\trid = 0x08;
 \t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);
-'''
-src = replace_once(src, old_hidden_drain, new_hidden_drain, "hidden interrupt stream")
+''',
+    "hidden interrupt stream",
+)
 
-old_hidden_get = '''\t} else if (itf == M15_SW2_JOYCON_R) {
+src = replace_once(
+    src,
+    '''\t} else if (itf == M15_SW2_JOYCON_R) {
 \t\tif (reportId == 0x05)
 \t\t\tsw2Build05Neutral((uint8_t)bond, p);
 \t\telse if (reportId == 0x08 || reportId == 0x09)
 \t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);
 \t\telse
 \t\t\treturn 0;
-'''
-new_hidden_get = '''\t} else if (itf == M15_SW2_JOYCON_R) {
+''',
+    '''\t} else if (itf == M15_SW2_JOYCON_R) {
 \t\tif (reportId == 0x08 || reportId == 0x09)
 \t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);
 \t\telse if (reportId == 0x05)
 \t\t\tsw2Build05Neutral((uint8_t)bond, p);
 \t\telse
 \t\t\treturn 0;
-'''
-src = replace_once(src, old_hidden_get, new_hidden_get, "hidden GET_REPORT")
+''',
+    "hidden GET_REPORT",
+)
 
 src = replace_once(
     src,
