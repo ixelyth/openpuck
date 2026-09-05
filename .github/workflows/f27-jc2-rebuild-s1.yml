@@ -1,0 +1,106 @@
+name: F27 Joy-Con2 rebuild S1 JCR identity
+
+on:
+  push:
+    branches:
+      - f27-jc2-rebuild-s1-jcr-identity
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+      - name: Compose clean-main S1
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          python3 tools/f27_jc2_rebuild_s1_integrate.py
+          git diff --check
+      - name: Verify S1 causal boundary
+        run: |
+          set -eu
+          grep -q 'F27-JC2-REBUILD-S1-IDENTITY' OpenPuck/mode_joycon2_rebuild.cpp
+          grep -q '0x057e, 0x2066' OpenPuck/mode_joycon2_rebuild.cpp
+          grep -q 'REBUILD_S1_HID_DESC' OpenPuck/mode_joycon2_rebuild.cpp
+          ! grep -q '0x85, 0x05' OpenPuck/mode_joycon2_rebuild.cpp
+          ! grep -q 'usbd_edpt_open' OpenPuck/mode_joycon2_rebuild.cpp
+          ! grep -q 'usbd_edpt_xfer' OpenPuck/mode_joycon2_rebuild.cpp
+          ! grep -q 'JOYCON2_CFG_BODY' OpenPuck/mode_joycon2_rebuild.cpp
+          ! grep -q 'joyCon2ClassDriver' OpenPuck/usb_app_drivers.cpp
+          ! grep -q 'tud_descriptor_device_cb' Makefile
+          ! grep -q 'tud_hid_descriptor_report_cb' Makefile
+          ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2_rebuild.cpp
+          echo 'S1 identity-only source guard PASS'
+      - name: Build Makerdiary S1
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-JC2-S1-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_JC2_REBUILD_FORCE=1"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-JC2-S1-JCR-Identity-MDK.uf2
+      - name: Validate S1 UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct
+          p=Path('build/mdk/OpenPuck-F27-JC2-S1-JCR-Identity-MDK.uf2')
+          data=p.read_bytes()
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          image=bytearray(); seen=[]; total=None; fam=None
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          for needle in (b'F27-JC2-REBUILD-S1-IDENTITY', b'Joy-Con 2 (R)', b'Nintendo'):
+              if needle not in image: raise SystemExit('missing marker '+repr(needle))
+          if b'F27-G5-CLEAN-JCR-GRIP08' in image: raise SystemExit('G5 contamination')
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data))
+          PY
+      - name: Record S1 manifest
+        run: |
+          sha256sum build/mdk/OpenPuck-F27-JC2-S1-JCR-Identity-MDK.uf2 > build/mdk/F27-JC2-S1-JCR-Identity.manifest.txt
+          printf '%s\n' \
+            'source_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d' \
+            'runtime_delta=one stock Adafruit HID plus JCR 057E:2066 identity' \
+            'hid_contract=unchanged stable legacy HORIPAD descriptor' \
+            'vendor_interface=absent' \
+            'custom_usb_driver=absent' \
+            'descriptor_wrappers=absent' \
+            'hardware_question=does identity-only JCR remain stably enumerated?' \
+            >> build/mdk/F27-JC2-S1-JCR-Identity.manifest.txt
+      - name: Upload S1
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-JC2-S1-JCR-Identity
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-JC2-S1-JCR-Identity-MDK.uf2
+            build/mdk/F27-JC2-S1-JCR-Identity.manifest.txt
