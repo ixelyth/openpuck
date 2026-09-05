@@ -1,0 +1,192 @@
+name: F27-M18 dual legacy Switch Pro topology probe
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m18-dual-legacy-pro
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M18
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Apply isolated M18 topology probe
+        run: python3 tools/f27_switch2pro_m18.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify pure reconciled experiment source
+        run: |
+          make format
+          make check
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/mode_switch_pro.cpp | sort)"
+          grep -q 'F27-M18-DUAL-LEGACY-SWPRO' OpenPuck/OpenPuck.ino
+          grep -q 'F27-M18-DUAL-LEGACY-SWPRO' OpenPuck/mode_switch_pro.cpp
+          grep -q 'g_usbMode = MODE_SW_PRO' OpenPuck/OpenPuck.ino
+          grep -q 'uint8_t mounted = k ? 2 : 0' OpenPuck/mode_switch_pro.cpp
+          grep -q 'm18NeutralizeCompanion' OpenPuck/mode_switch_pro.cpp
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Keep both packages intentionally unpinned, matching project policy.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard F27-M18 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M18-DUALPRO-${short}" ./gen_version.sh
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M18-DualLegacyPro-standard.uf2
+          cp build/f27-standard/OpenPuck-F27-M18-DualLegacyPro-standard.uf2 /tmp/
+          cp build/f27-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M18-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Reapply M18 over Makerdiary build composition
+        run: |
+          python3 tools/f27_switch2pro_m18.py
+          make format
+          make check
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-M18-DUAL-LEGACY-SWPRO' OpenPuck/OpenPuck.ino
+          grep -q 'F27-M18-DUAL-LEGACY-SWPRO' OpenPuck/mode_switch_pro.cpp
+
+      - name: Build Makerdiary MDK F27-M18 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M18-DUALPRO-${short}" ./gen_version.sh
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M18-DualLegacyPro-MDK.uf2
+          mkdir -p build/f27-standard
+          cp /tmp/OpenPuck-F27-M18-DualLegacyPro-standard.uf2 build/f27-standard/
+          cp /tmp/OpenPuck-F27-M18-standard.hex build/f27-standard/OpenPuck.ino.hex
+
+      - name: Validate M18 artifact identity
+        run: |
+          set -eu
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+
+          def inspect(path):
+              data = Path(path).read_bytes()
+              if len(data) % 512:
+                  raise SystemExit(f"non-UF2 length: {path}")
+              payloads = []
+              addrs = []
+              total = None
+              family = None
+              seen = []
+              for off in range(0, len(data), 512):
+                  b = data[off:off+512]
+                  m0, m1, flags, addr, size, no, nblocks, fam = struct.unpack_from("<IIIIIIII", b, 0)
+                  if (m0, m1) != (0x0A324655, 0x9E5D5157):
+                      raise SystemExit(f"bad UF2 magic in {path}")
+                  if size > 476:
+                      raise SystemExit(f"bad UF2 payload size in {path}")
+                  total = nblocks if total is None else total
+                  family = fam if family is None else family
+                  if nblocks != total or fam != family:
+                      raise SystemExit(f"inconsistent UF2 metadata in {path}")
+                  seen.append(no)
+                  if addr >= 0x26000:
+                      payloads.append(b[32:32+size])
+                      addrs.append(addr)
+              if seen != list(range(total)):
+                  raise SystemExit(f"non-sequential UF2 blocks in {path}")
+              image = b"".join(payloads)
+              if b"F27-M18-DUAL-LEGACY-SWPRO" not in image:
+                  raise SystemExit(f"missing M18 marker in {path}")
+              if b"F27-M18-DUALPRO-" not in image:
+                  raise SystemExit(f"missing M18 build label in {path}")
+              print(path, "PASS", "blocks", total, "family", hex(family),
+                    "range", hex(min(addrs)), hex(max(addrs)+256))
+
+          for p in [
+              "build/f27-standard/OpenPuck-F27-M18-DualLegacyPro-standard.uf2",
+              "build/mdk/OpenPuck-F27-M18-DualLegacyPro-MDK.uf2",
+          ]:
+              inspect(p)
+          PY
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M18-DualLegacyPro.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          runtime_base_tree=530264b182ea3f3f9b7bbbc32670039d01b40eea
+          makerdiary_authority=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          target=F27-M18-DualLegacyPro
+          prior_m15=dual Switch2Pro/JoyCon2 composite behind one USB address showed one visible Switch2Pro only
+          prior_m16=hidden JoyCon2-R report08 mouse stream FAIL
+          prior_m17=generic HID mouse INCONCLUSIVE because physical USB mouse control also failed in same test context
+          purpose=determine whether Switch 2 promotes two legacy Switch Pro HID controller interfaces behind one physical USB device address
+          forced_mode=MODE_SW_PRO, non-persistent experimental override
+          topology=one OpenPuck USB device; two legacy Switch Pro HID controller interfaces whenever at least one Steam Controller is connected
+          slot0=normal live mapped controller
+          slot1=ordinary legacy Pro handshake and distinct per-slot MAC; neutral streamed 0x30 input; rumble relay suppressed
+          hardware_question=Controllers/Change Grip Order shows one or two Switch Pro controllers
+          success=two independent Switch Pro controller slots appear
+          fail=only one Switch Pro controller slot appears
+          EOF
+          sha256sum build/f27-standard/OpenPuck-F27-M18-DualLegacyPro-standard.uf2 >> build/F27-M18-DualLegacyPro.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-M18-DualLegacyPro-MDK.uf2 >> build/F27-M18-DualLegacyPro.manifest.txt
+
+      - name: Upload F27-M18 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M18-DualLegacyPro
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M18-DualLegacyPro-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M18-DualLegacyPro-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M18-DualLegacyPro.manifest.txt
