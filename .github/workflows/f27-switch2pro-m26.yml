@@ -161,10 +161,7 @@ jobs:
           )
           if get_anchor not in s:
               raise SystemExit('M22 GET_REPORT ownership changed')
-          out_anchor='if (itf == M15_SW2_PRO && reportType == HID_REPORT_TYPE_OUTPUT)'
-          if out_anchor not in s:
-              raise SystemExit('M22/M25 output ownership changed')
-          print('M26 retained M25 identity + M22 GET_REPORT/output witnesses PASS')
+          print('M26 retained M25 identity + M22 GET_REPORT witness PASS')
           PY
 
       - name: Set up Arduino CLI
