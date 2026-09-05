@@ -1,0 +1,177 @@
+name: F27 Joy-Con 2 clean rebuild stages S0-S3
+
+on:
+  push:
+    branches:
+      - f27-joycon2-rebuild-clean-stages
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-stage:
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out staged-rebuild branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify pristine upstream runtime base
+        run: |
+          set -eu
+          test "$(git merge-base HEAD 29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d)" = "29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d"
+          git diff --exit-code 29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d -- OpenPuck Makefile
+          test ! -e OpenPuck/mode_joycon2_rebuild.cpp
+          test ! -e OpenPuck/mode_joycon2_rebuild.h
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Compose Makerdiary plus exactly one rebuild stage
+        env:
+          STAGE: ${{ matrix.stage }}
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          python3 tools/f27_jc2_clean_rebuild.py --stage "$STAGE"
+          git diff --check
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          test ! -e OpenPuck/mode_switch2_pro.cpp
+          test ! -e OpenPuck/mode_switch2_pro.h
+          if [ "$STAGE" = 0 ]; then
+            test ! -e OpenPuck/mode_joycon2_rebuild.cpp
+            grep -q 'F27 clean rebuild S0' OpenPuck/OpenPuck.ino
+            ! grep -q -- '--wrap=tud_descriptor_device_cb' Makefile
+          else
+            test -e OpenPuck/mode_joycon2_rebuild.cpp
+            test -e OpenPuck/mode_joycon2_rebuild.h
+            grep -q '#define MODE_JOYCON2_REBUILD 13' OpenPuck/config.h
+            grep -q 'Joy-Con 2 (R)' OpenPuck/mode_joycon2_rebuild.cpp
+            grep -q 'Adafruit_USBD_HID g_jc2StageHid' OpenPuck/mode_joycon2_rebuild.cpp
+            ! grep -q 'usbd_class_driver_t' OpenPuck/mode_joycon2_rebuild.cpp
+            ! grep -q 'usbd_edpt_open' OpenPuck/mode_joycon2_rebuild.cpp
+            ! grep -q 'usbd_edpt_xfer' OpenPuck/mode_joycon2_rebuild.cpp
+            ! grep -q 'JOYCON2_CFG_BODY' OpenPuck/mode_joycon2_rebuild.cpp
+            ! grep -q -- '--wrap=tud_descriptor_configuration_cb' Makefile
+            ! grep -q -- '--wrap=tud_hid_descriptor_report_cb' Makefile
+            ! grep -q -- '--wrap=tud_hid_get_report_cb' Makefile
+            ! grep -q -- '--wrap=tud_hid_set_report_cb' Makefile
+            if [ "$STAGE" = 1 ]; then
+              grep -q 'S1 intentionally uses a conventional' OpenPuck/mode_joycon2_rebuild.cpp
+              ! grep -q -- '--wrap=tud_descriptor_device_cb' Makefile
+            elif [ "$STAGE" = 2 ]; then
+              grep -q 'static_assert(sizeof JC2_STAGE_HID_DESC == 100' OpenPuck/mode_joycon2_rebuild.cpp
+              ! grep -q -- '--wrap=tud_descriptor_device_cb' Makefile
+            elif [ "$STAGE" = 3 ]; then
+              grep -q 'static_assert(sizeof JC2_STAGE_HID_DESC == 100' OpenPuck/mode_joycon2_rebuild.cpp
+              grep -q -- '--wrap=tud_descriptor_device_cb' Makefile
+              grep -q '__wrap_tud_descriptor_device_cb' OpenPuck/mode_joycon2_rebuild.cpp
+            fi
+          fi
+
+      - name: Build Makerdiary stage
+        env:
+          STAGE: ${{ matrix.stage }}
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-JC2-RB-S${STAGE}-${short}" ./gen_version.sh
+          rm -rf build/mdk build/cache/mdk
+          make build-mdk EXTRA_FLAGS="-DOPK_JC2_REBUILD_STAGE=${STAGE}"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex "build/mdk/OpenPuck-F27-JC2-Rebuild-S${STAGE}-MDK.uf2"
+
+      - name: Validate UF2 and stage markers
+        env:
+          STAGE: ${{ matrix.stage }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, struct, hashlib
+          s=int(os.environ['STAGE'])
+          p=Path(f'build/mdk/OpenPuck-F27-JC2-Rebuild-S{s}-MDK.uf2')
+          data=p.read_bytes()
+          if len(data)%512: raise SystemExit('bad UF2 size')
+          nums=[]; total=None; fam=None; image=bytearray(); lo=None; hi=None
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              nums.append(no)
+              if addr>=0x26000:
+                  image += b[32:32+size]
+                  lo=addr if lo is None else min(lo,addr)
+                  hi=addr+size if hi is None else max(hi,addr+size)
+          if nums != list(range(total)): raise SystemExit('non-sequential UF2')
+          if fam != 0xADA52840: raise SystemExit('wrong UF2 family')
+          build=f'F27-JC2-RB-S{s}-'.encode()
+          if build not in image: raise SystemExit('missing build marker')
+          if s==0:
+              if b'POKKEN CONTROLLER' not in image: raise SystemExit('S0 missing upstream HORIPAD control product')
+              if b'Joy-Con 2 (R)' in image: raise SystemExit('S0 contaminated by Joy-Con product')
+          else:
+              marker=f'F27-JC2-CLEAN-REBUILD-S{s}'.encode()
+              if marker not in image: raise SystemExit('missing rebuild stage marker')
+              if b'Joy-Con 2 (R)' not in image: raise SystemExit('missing JCR product')
+              if b'Switch 2 Pro Controller' in image: raise SystemExit('Pro2 product contamination')
+          print('PASS',p,'sha256',hashlib.sha256(data).hexdigest(),'blocks',total,'range',hex(lo),hex(hi))
+          PY
+
+      - name: Record stage manifest
+        env:
+          STAGE: ${{ matrix.stage }}
+        run: |
+          set -eu
+          case "$STAGE" in
+            0) delta='clean upstream + Makerdiary build-only support; force existing HORIPAD mode only' ;;
+            1) delta='S0-independent JCR mode; stock Adafruit single HID; generic proven gamepad report descriptor; no wrappers/vendor/custom driver' ;;
+            2) delta='S1 plus captured 100-byte JCR HID report descriptor only' ;;
+            3) delta='S2 plus device descriptor class EF/02/01 wrapper only' ;;
+          esac
+          mkdir -p build/rebuild-manifest
+          out="build/rebuild-manifest/F27-JC2-Rebuild-S${STAGE}.manifest.txt"
+          cat > "$out" <<EOF
+          stage=${STAGE}
+          source_branch=f27-joycon2-rebuild-clean-stages
+          source_commit=${GITHUB_SHA}
+          pristine_runtime_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          pristine_runtime_tree=69a788e001ce40e7e3a8a546dd1929e04d26fdfb
+          makerdiary_build_only_patch=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          g5_source_dependency=NONE
+          switch2pro_source_dependency=NONE
+          stage_delta=${delta}
+          hardware_question=enumeration stability first; do not infer controller protocol behavior from these early stages
+          EOF
+          sha256sum "build/mdk/OpenPuck-F27-JC2-Rebuild-S${STAGE}-MDK.uf2" >> "$out"
+
+      - name: Upload stage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-JC2-Rebuild-S${{ matrix.stage }}-MDK
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-JC2-Rebuild-S${{ matrix.stage }}-MDK.uf2
+            build/rebuild-manifest/F27-JC2-Rebuild-S${{ matrix.stage }}.manifest.txt
