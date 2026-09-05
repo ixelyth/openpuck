@@ -1,0 +1,184 @@
+name: F27-M23 Joy-Con R plus Joy-Con L left-pad mouse
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m23-jcr-jcl-left-mouse
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M23
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Recover pinned topology and mouse helpers
+        run: |
+          set -eu
+          git fetch origin b6bce4d387433372f480593bd28de506ff0b5368 1fecb47401ed9fb7bdb22b8c6fe4707575411250 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+
+      - name: Apply M21 M22 and M23 composition
+        run: |
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m23.py
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify M23 source
+        run: |
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h OpenPuck/mode_switch2_pro.cpp | sort)"
+          grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          grep -q '? 0x67 : 0x66' OpenPuck/mode_switch2_pro.cpp
+          grep -q '? 0x07 : 0x08' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'rid = 0x07' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'reportId == 0x07' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'TB_LPADT' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard F27-M23 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M23-JCRJCL-${short}" ./gen_version.sh
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build BUILD_PATH=build/cache/f27-standard OUTPUT_DIR=build/f27-standard EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex build/f27-standard/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-standard.uf2
+          cp build/f27-standard/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-standard.uf2 /tmp/
+          cp build/f27-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M23-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Recompose M23 over Makerdiary build
+        run: |
+          set -eu
+          git fetch origin b6bce4d387433372f480593bd28de506ff0b5368 1fecb47401ed9fb7bdb22b8c6fe4707575411250 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag; done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m23.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Build Makerdiary MDK F27-M23 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M23-JCRJCL-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-MDK.uf2
+          mkdir -p build/f27-standard
+          cp /tmp/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-standard.uf2 build/f27-standard/
+          cp /tmp/OpenPuck-F27-M23-standard.hex build/f27-standard/OpenPuck.ino.hex
+
+      - name: Validate M23 artifact identity
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, os
+          marker=b'F27-M23-JCR-JCL-LEFT-MOUSE'
+          build=("F27-M23-JCRJCL-"+os.environ['GITHUB_SHA'][:8]).encode()
+          for path in ['build/f27-standard/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-standard.uf2','build/mdk/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-MDK.uf2']:
+              data=Path(path).read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; addrs=[]
+              if len(data)%512: raise SystemExit('bad UF2 length')
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]; m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
+                  total=nblocks if total is None else total; fam=family if fam is None else fam
+                  if nblocks!=total or family!=fam: raise SystemExit('metadata mismatch')
+                  seen.append(no)
+                  if addr>=0x26000: image += b[32:32+size]; addrs.append(addr)
+              if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+              if marker not in image or build not in image: raise SystemExit('missing M23 identity')
+              print(path,'PASS','blocks',total,'family',hex(fam),'range',hex(min(addrs)),hex(max(addrs)+256))
+          PY
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M23-JoyConR-JoyConL-LeftMouse.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          m20_hardware_positive=6c2e191693fec0baadeeda8938275e6d04a5463b
+          m21_dual_jcr=2f990e0f3e9401a734427e23e8223f2b9f1be799
+          corrected_m22_helper=5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8
+          session0=Joy-Con2-R PID2066 report08 live inputs and right-pad mouse
+          session1=Joy-Con2-L PID2067 report07 distinct address/serial; left-pad mouse; neutral buttons/stick; forced HID1 stream
+          shared_ep0=one USB address; shared EP0 logical PID remains Joy-Con2-R 2066
+          purpose=test whether heterogeneous R+L identities can coexist where dual R+R shows only one visible controller
+          caveat=standalone Joy-Con2-L personality was not previously hardware-positive; negative M23 cannot alone prove host collapse
+          EOF
+          sha256sum build/f27-standard/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-standard.uf2 >> build/F27-M23-JoyConR-JoyConL-LeftMouse.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-MDK.uf2 >> build/F27-M23-JoyConR-JoyConL-LeftMouse.manifest.txt
+
+      - name: Upload F27-M23 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M23-JoyConR-JoyConL-LeftMouse-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M23-JoyConR-JoyConL-LeftMouse.manifest.txt
