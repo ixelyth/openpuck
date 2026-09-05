@@ -1,0 +1,14 @@
+# Correct the one raw-string insertion above: the neutral topology builders are
+# inserted with literal "\\t" text, unlike regex replacement strings where re.sub
+# interprets those escapes.  Normalize only that generated C++ region so existing
+# escape sequences elsewhere in the source are untouched.
+fixed = MODE.read_text(encoding="utf-8")
+start = fixed.index("static void sw2BuildJoyconRNeutral")
+end = fixed.index("static void sw2Drain", start)
+region = fixed[start:end]
+if "\\t" not in region:
+    raise SystemExit("M15 tab-fix: expected literal tab escapes not found")
+region = region.replace("\\t", "\t")
+fixed = fixed[:start] + region + fixed[end:]
+MODE.write_text(fixed, encoding="utf-8")
+print("F27-M15 neutral-builder tab escapes normalized")
