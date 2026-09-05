@@ -715,6 +715,13 @@ void hapticTestRumble()
 
 void hapticTask()
 {
+	// stop the test buzz -- signed compare so the millis() rollover cannot strand a latched actuator
+	if (g_rumbleTestStop && (long)(millis() - g_rumbleTestStop) >= 0) {
+		g_rumbleTestStop = 0;
+		for (uint8_t s = 0; s < NSLOT; s++)
+			hapticSteamRumble(0, 0, s);
+	}
+
 	// The journal-builder tick is outside the measured window. Queue explicit
 	// stops before the builder's inter-channel quiet guard expires.
 	if (g_rfJournalBuilderTickStop &&
