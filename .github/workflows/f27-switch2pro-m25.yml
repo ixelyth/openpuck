@@ -47,10 +47,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-format-18
 
-      - name: Freeze formatted M22 runtime witness
+      - name: Freeze exact M22 runtime witness
         run: |
           set -eu
-          make format
           cp OpenPuck/OpenPuck.ino /tmp/m22-OpenPuck.ino
           cp OpenPuck/f27_joycon2.cpp /tmp/m22-f27_joycon2.cpp
           cp OpenPuck/f27_joycon2.h /tmp/m22-f27_joycon2.h
@@ -59,24 +58,9 @@ jobs:
       - name: Apply M25 identity-only swap
         run: python3 tools/f27_switch2pro_m25.py
 
-      - name: Format and verify M25 source
+      - name: Prove exact identity-only delta
         run: |
           set -eu
-          make format
-          make check
-          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
-          git diff --check
-          test ! -e OpenPuck/git_version.h
-          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h OpenPuck/mode_switch2_pro.cpp | sort)"
-          grep -q 'F27-M22-HIDDEN-JCR-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
-          grep -q 'F27-M25-IDENTITY-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
-          ! grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
-          ! grep -q 'F27-M24-ROLE-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
-          grep -q 's != M15_SW2_JOYCON_R' OpenPuck/mode_switch2_pro.cpp
-          grep -q 'm22BuildHiddenLeftMouse' OpenPuck/mode_switch2_pro.cpp
-          grep -q 'TB_LPADT' OpenPuck/mode_switch2_pro.cpp
-          grep -q 'bool requestedMouse = true' OpenPuck/f27_joycon2.cpp
-          grep -q 'if (surface)' OpenPuck/f27_joycon2.cpp
           cmp /tmp/m22-OpenPuck.ino OpenPuck/OpenPuck.ino
           cmp /tmp/m22-f27_joycon2.cpp OpenPuck/f27_joycon2.cpp
           cmp /tmp/m22-f27_joycon2.h OpenPuck/f27_joycon2.h
@@ -130,6 +114,25 @@ jobs:
               raise SystemExit('M25 changed mode_switch2_pro.cpp outside the exact identity-only delta')
           print('M25 exact identity-only source witness PASS')
           PY
+
+      - name: Format and verify M25 source
+        run: |
+          set -eu
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h OpenPuck/mode_switch2_pro.cpp | sort)"
+          grep -q 'F27-M22-HIDDEN-JCR-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-M25-IDENTITY-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M24-ROLE-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 's != M15_SW2_JOYCON_R' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm22BuildHiddenLeftMouse' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'TB_LPADT' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'bool requestedMouse = true' OpenPuck/f27_joycon2.cpp
+          grep -q 'if (surface)' OpenPuck/f27_joycon2.cpp
 
       - name: Set up Arduino CLI
         uses: arduino/setup-arduino-cli@v2
@@ -195,11 +198,13 @@ jobs:
           python3 tools/f27_switch2pro_m15.py
           python3 tools/f27_switch2pro_m21.py
           python3 tools/f27_switch2pro_m22.py
-          make format
           cp OpenPuck/OpenPuck.ino /tmp/mdk-m22-OpenPuck.ino
           cp OpenPuck/f27_joycon2.cpp /tmp/mdk-m22-f27_joycon2.cpp
           cp OpenPuck/f27_joycon2.h /tmp/mdk-m22-f27_joycon2.h
           python3 tools/f27_switch2pro_m25.py
+          cmp /tmp/mdk-m22-OpenPuck.ino OpenPuck/OpenPuck.ino
+          cmp /tmp/mdk-m22-f27_joycon2.cpp OpenPuck/f27_joycon2.cpp
+          cmp /tmp/mdk-m22-f27_joycon2.h OpenPuck/f27_joycon2.h
           make format
           make check
           git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
@@ -207,9 +212,6 @@ jobs:
           test ! -e OpenPuck/git_version.h
           grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
           grep -q 'F27-M25-IDENTITY-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
-          cmp /tmp/mdk-m22-OpenPuck.ino OpenPuck/OpenPuck.ino
-          cmp /tmp/mdk-m22-f27_joycon2.cpp OpenPuck/f27_joycon2.cpp
-          cmp /tmp/mdk-m22-f27_joycon2.h OpenPuck/f27_joycon2.h
 
       - name: Build Makerdiary MDK F27-M25 target
         run: |
