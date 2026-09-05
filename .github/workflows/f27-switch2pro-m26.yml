@@ -1,0 +1,336 @@
+name: F27-M26 dual Joy-Con 2 R interrupt-payload-only swap probe
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m26-input-payload-swap-jcr
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M26
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Recover pinned M15 M3 M21 M22 M25 composition tools
+        run: |
+          set -eu
+          git fetch origin \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250 \
+            2f990e0f3e9401a734427e23e8223f2b9f1be799 \
+            5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8 \
+            fb3ac5f57a2d379b8849d84637c956c05e4a204e
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 2f990e0f3e9401a734427e23e8223f2b9f1be799:tools/f27_switch2pro_m21.py > tools/f27_switch2pro_m21.py
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+          git show fb3ac5f57a2d379b8849d84637c956c05e4a204e:tools/f27_switch2pro_m25.py > tools/f27_switch2pro_m25.py
+
+      - name: Compose hardware-adjudicated M25 runtime
+        run: |
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m25.py
+
+      - name: Freeze exact M25 runtime witness
+        run: |
+          set -eu
+          cp OpenPuck/OpenPuck.ino /tmp/m25-OpenPuck.ino
+          cp OpenPuck/f27_joycon2.cpp /tmp/m25-f27_joycon2.cpp
+          cp OpenPuck/f27_joycon2.h /tmp/m25-f27_joycon2.h
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/m25-mode_switch2_pro.cpp
+
+      - name: Apply M26 interrupt-payload-only swap
+        run: python3 tools/f27_switch2pro_m26.py
+
+      - name: Prove exact M26 source delta
+        run: |
+          set -eu
+          cmp /tmp/m25-OpenPuck.ino OpenPuck/OpenPuck.ino
+          cmp /tmp/m25-f27_joycon2.cpp OpenPuck/f27_joycon2.cpp
+          cmp /tmp/m25-f27_joycon2.h OpenPuck/f27_joycon2.h
+          python3 - <<'PY'
+          from pathlib import Path
+          before = Path('/tmp/m25-mode_switch2_pro.cpp').read_text()
+          after = Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          expected = before
+
+          def repl(old, new, label):
+              global expected
+              n = expected.count(old)
+              if n != 1:
+                  raise SystemExit(f'M26 independent {label} witness count {n}, expected 1')
+              expected = expected.replace(old, new, 1)
+
+          repl(
+              'static const char M25_BUILD_MARKER[] __attribute__((used)) =\n'
+              '\t"F27-M25-IDENTITY-SWAP-JCR";\n',
+              'static const char M25_BUILD_MARKER[] __attribute__((used)) =\n'
+              '\t"F27-M25-IDENTITY-SWAP-JCR";\n'
+              'static const char M26_BUILD_MARKER[] __attribute__((used)) =\n'
+              '\t"F27-M26-INPUT-PAYLOAD-SWAP-JCR";\n',
+              'marker',
+          )
+          old_drain = '''\t\tif (s == M15_SW2_JOYCON_R) {
+\t\t\t// Force the unseen companion to native report 0x08.
+\t\t\trid = 0x08;
+\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);
+\t\t} else if (rid == 0x05) {
+\t\t\tsw2Build05((uint8_t)bond, p);
+\t\t} else if (!f27JoyconBuildNative((uint8_t)bond, g_sw2Features, &rid, p)) {
+\t\t\trid = 0x08;
+\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);
+\t\t}
+'''
+          new_drain = '''\t\tif (s == M15_SW2_PRO) {
+\t\t\t// M26 first function carries only the LEFT-pad mouse payload.
+\t\t\trid = 0x08;
+\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);
+\t\t} else if (rid == 0x05) {
+\t\t\t// M26 second function carries the unchanged live common payload.
+\t\t\tsw2Build05((uint8_t)bond, p);
+\t\t} else if (!f27JoyconBuildNative((uint8_t)bond, g_sw2Features, &rid, p)) {
+\t\t\trid = 0x08;
+\t\t\tsw2BuildJoyconRNeutral((uint8_t)bond, p);
+\t\t}
+'''
+          repl(old_drain, new_drain, 'interrupt payload block')
+          repl(
+              '\tasm volatile("" : : "r"(M25_BUILD_MARKER) : "memory");\n',
+              '\tasm volatile("" : : "r"(M25_BUILD_MARKER) : "memory");\n'
+              '\tasm volatile("" : : "r"(M26_BUILD_MARKER) : "memory");\n',
+              'marker retention',
+          )
+          if after != expected:
+              raise SystemExit('M26 changed mode_switch2_pro.cpp outside marker + periodic interrupt payload ownership')
+          print('M26 exact interrupt-payload-only source witness PASS')
+          PY
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify M26 source
+        run: |
+          set -eu
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/OpenPuck.ino OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h OpenPuck/mode_switch2_pro.cpp | sort)"
+          grep -q 'F27-M22-HIDDEN-JCR-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-M25-IDENTITY-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-M26-INPUT-PAYLOAD-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M24-ROLE-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M26 first function carries only the LEFT-pad mouse payload' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M26 second function carries the unchanged live common payload' OpenPuck/mode_switch2_pro.cpp
+          grep -q 's != M15_SW2_JOYCON_R' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm22BuildHiddenLeftMouse' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'TB_LPADT' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'bool requestedMouse = true' OpenPuck/f27_joycon2.cpp
+          grep -q 'if (surface)' OpenPuck/f27_joycon2.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          if 'if (g_sw2SessionCtx == M15_SW2_PRO)\n\t\tout[5] ^= 0x01u;' not in s:
+              raise SystemExit('M25 companion address role not retained on session0')
+          if 'if (g_sw2SessionCtx == M15_SW2_PRO) {\n\t\tconst uint32_t serialTail' not in s:
+              raise SystemExit('M25 companion serial role not retained on session0')
+          # M22 GET_REPORT role must remain untouched: hidden LEFT mouse belongs to HID1 there.
+          get_anchor='''\t} else if (itf == M15_SW2_JOYCON_R) {
+\t\tif (reportId == 0x08 || reportId == 0x09)
+\t\t\tm22BuildHiddenLeftMouse((uint8_t)bond, p);
+\t\telse if (reportId == 0x05)
+\t\t\tsw2Build05Neutral((uint8_t)bond, p);
+'''
+          if get_anchor not in s:
+              raise SystemExit('M22 GET_REPORT ownership changed')
+          # Output/rumble ownership must remain on session0 as in M22/M25.
+          out_anchor='if (itf == M15_SW2_PRO && reportType == HID_REPORT_TYPE_OUTPUT)'
+          if out_anchor not in s:
+              raise SystemExit('M22/M25 output ownership changed')
+          print('M26 retained M25 identity + M22 GET_REPORT/output witnesses PASS')
+          PY
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard F27-M26 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M26-PAYLOAD-${short}" ./gen_version.sh
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-standard.uf2
+          cp build/f27-standard/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-standard.uf2 /tmp/
+          cp build/f27-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M26-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Recompose exact M26 over Makerdiary build
+        run: |
+          set -eu
+          git fetch origin \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250 \
+            2f990e0f3e9401a734427e23e8223f2b9f1be799 \
+            5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8 \
+            fb3ac5f57a2d379b8849d84637c956c05e4a204e
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 2f990e0f3e9401a734427e23e8223f2b9f1be799:tools/f27_switch2pro_m21.py > tools/f27_switch2pro_m21.py
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+          git show fb3ac5f57a2d379b8849d84637c956c05e4a204e:tools/f27_switch2pro_m25.py > tools/f27_switch2pro_m25.py
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m25.py
+          cp OpenPuck/OpenPuck.ino /tmp/mdk-m25-OpenPuck.ino
+          cp OpenPuck/f27_joycon2.cpp /tmp/mdk-m25-f27_joycon2.cpp
+          cp OpenPuck/f27_joycon2.h /tmp/mdk-m25-f27_joycon2.h
+          python3 tools/f27_switch2pro_m26.py
+          cmp /tmp/mdk-m25-OpenPuck.ino OpenPuck/OpenPuck.ino
+          cmp /tmp/mdk-m25-f27_joycon2.cpp OpenPuck/f27_joycon2.cpp
+          cmp /tmp/mdk-m25-f27_joycon2.h OpenPuck/f27_joycon2.h
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-M26-INPUT-PAYLOAD-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Build Makerdiary MDK F27-M26 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M26-PAYLOAD-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-MDK.uf2
+          mkdir -p build/f27-standard
+          cp /tmp/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-standard.uf2 build/f27-standard/
+          cp /tmp/OpenPuck-F27-M26-standard.hex build/f27-standard/OpenPuck.ino.hex
+
+      - name: Validate M26 artifact identity
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, os
+          build=("F27-M26-PAYLOAD-"+os.environ['GITHUB_SHA'][:8]).encode()
+          marker=b'F27-M26-INPUT-PAYLOAD-SWAP-JCR'
+          retained=b'F27-M25-IDENTITY-SWAP-JCR'
+          for path in [
+              'build/f27-standard/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-standard.uf2',
+              'build/mdk/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-MDK.uf2',
+          ]:
+              data=Path(path).read_bytes()
+              if len(data)%512: raise SystemExit(f'non-UF2 length: {path}')
+              image=bytearray(); seen=[]; total=None; fam=None; addrs=[]; flags_seen=None
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit(f'bad magic: {path}')
+                  total=nblocks if total is None else total
+                  fam=family if fam is None else fam
+                  flags_seen=flags if flags_seen is None else flags_seen
+                  if nblocks!=total or family!=fam or flags!=flags_seen:
+                      raise SystemExit(f'inconsistent metadata: {path}')
+                  seen.append(no)
+                  if addr>=0x26000:
+                      image += b[32:32+size]; addrs.append(addr)
+              if seen != list(range(total)): raise SystemExit(f'non-sequential blocks: {path}')
+              if marker not in image: raise SystemExit(f'missing M26 marker: {path}')
+              if retained not in image: raise SystemExit(f'missing retained M25 marker: {path}')
+              if build not in image: raise SystemExit(f'missing M26 build label: {path}')
+              print(path,'PASS','blocks',total,'flags',hex(flags_seen),'family',hex(fam),'range',hex(min(addrs)),hex(max(addrs)+256))
+          PY
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M26-InputPayloadSwap-JoyConR.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          m20_hardware_positive=6c2e191693fec0baadeeda8938275e6d04a5463b
+          m21_dual_topology=2f990e0f3e9401a734427e23e8223f2b9f1be799
+          m22_hidden_session_hardware_fail=5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8
+          m25_identity_only_source=fb3ac5f57a2d379b8849d84637c956c05e4a204e
+          m25_hardware_result=one Joy-Con2-R; ordinary controls and RIGHT trackpad work; LEFT hidden trackpad does not
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          target=F27-M26-InputPayloadSwap-JoyConR
+          topology=identical dual Joy-Con2-R descriptor/function topology as M22/M25
+          identity=session0 companion address+serial and session1 original address+serial exactly as hardware-adjudicated M25
+          session0_interrupt=FIRST USB function; LEFT-trackpad-only M22 mouse payload; normal host input-enable state
+          session1_interrupt=SECOND USB function; unchanged live ordinary controls + RIGHT-trackpad M3 payload; M22 HID1 input-enable bypass retained
+          get_report=unchanged M22/M25 ownership
+          output_rumble=unchanged M22/M25 session0 ownership
+          purpose=isolate whether periodic interrupt-IN consumption follows first USB function after M25 ruled out address/serial identity selection
+          result_if_left_only=host consumes first Nintendo USB function interrupt stream; second stream remains ignored
+          result_if_right_plus_controls=interrupt payload ownership does not follow function order; another session binding rule dominates
+          result_if_neither=periodic live payload semantics on session0 are required for registration/input enable and must be isolated further
+          EOF
+          sha256sum build/f27-standard/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-standard.uf2 >> build/F27-M26-InputPayloadSwap-JoyConR.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-MDK.uf2 >> build/F27-M26-InputPayloadSwap-JoyConR.manifest.txt
+
+      - name: Upload F27-M26 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M26-InputPayloadSwap-JoyConR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M26-InputPayloadSwap-JoyConR-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M26-InputPayloadSwap-JoyConR.manifest.txt
