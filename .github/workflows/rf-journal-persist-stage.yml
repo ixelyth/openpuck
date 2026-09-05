@@ -1,0 +1,117 @@
+name: Temporary RF journal persistence staging patch
+
+on:
+  push:
+    branches:
+      - rf-recovery-journal-persist-stage
+    paths:
+      - '.github/workflows/rf-journal-persist-stage.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: rf-recovery-journal-persist-stage
+          fetch-depth: 0
+      - name: Apply deterministic source patch
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {count}: {old[:80]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          Path('OpenPuck/rf_journal_layout.h').write_text('''// Fixed flash layout for the RF channel-history journal.\n//\n// Normal application images are capped immediately below this window, while\n// staged WebUSB update data starts above it. Keeping the journal outside both\n// regions lets learned RF history survive ordinary firmware updates. A full\n// board wipe still erases this application-flash window intentionally.\n#pragma once\n#include <stdint.h>\n\n#define RF_CHANNEL_JOURNAL_PAGE_BYTES 4096u\n#define RF_CHANNEL_JOURNAL_PAGE_COUNT 2u\n#define RF_CHANNEL_JOURNAL_BASE 0x86000UL\n#define RF_CHANNEL_JOURNAL_END \\\n\t(RF_CHANNEL_JOURNAL_BASE + \\\n\t RF_CHANNEL_JOURNAL_PAGE_BYTES * RF_CHANNEL_JOURNAL_PAGE_COUNT)\n\nstatic_assert((RF_CHANNEL_JOURNAL_BASE &\n\t       (RF_CHANNEL_JOURNAL_PAGE_BYTES - 1u)) == 0u,\n\t      "RF journal base must be page aligned");\n''')
+
+          replace_once('OpenPuck/rf_link.cpp',
+                       '#include "rf_link.h"\n#include "radio.h"',
+                       '#include "rf_link.h"\n#include "rf_journal_layout.h"\n#include "radio.h"')
+          replace_once('OpenPuck/rf_link.cpp',
+                       '#define RF_CHANNEL_JOURNAL_FORMAT 2u\n#define RF_CHANNEL_JOURNAL_PAGE_BYTES 4096u\n#define RF_CHANNEL_JOURNAL_PAGE_COUNT 2u\n#define RF_CHANNEL_JOURNAL_WORD_INTERVAL_US 8000u',
+                       '#define RF_CHANNEL_JOURNAL_FORMAT 2u\n#define RF_CHANNEL_JOURNAL_WORD_INTERVAL_US 8000u')
+
+          p = Path('OpenPuck/rf_link.cpp')
+          text = p.read_text()
+          pattern = re.compile(r'// Reserve two complete, page-aligned application-flash pages\..*?#undef CHANNEL_JOURNAL_FF1\n', re.S)
+          replacement = '''// The journal occupies a fixed flash window outside the linked application\n// image. The WebUSB updater caps normal images below this address and stages\n// incoming data above the journal, so neither update path aliases learned RF\n// history. If a future build grows into the reserved window, persistence fails\n// closed instead of writing over live firmware.\nextern "C" {\nextern uint32_t __etext[];\nextern uint32_t __data_start__[];\nextern uint32_t __data_end__[];\n}\nstatic uintptr_t rfChannelJournalFlashUsedEnd()\n{\n\treturn (uintptr_t)__etext +\n\t       ((uintptr_t)__data_end__ - (uintptr_t)__data_start__);\n}\n'''
+          text, n = pattern.subn(replacement, text, count=1)
+          if n != 1:
+              raise SystemExit(f'OpenPuck/rf_link.cpp: journal reservation block matches={n}')
+          p.write_text(text)
+
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''\tif (status->handoffPhase != RF_RECOVERY_HANDOFF_IDLE) {\n\t\tconst uint32_t elapsed =\n\t\t\t(uint32_t)(millis() - g_rfChHandoffTelemetryStartedMs);\n\t\tstatus->handoffElapsedMs =\n\t\t\telapsed > 0xFFFFu ? 0xFFFFu : (uint16_t)elapsed;\n\t}\n''',
+                       '''\tif (status->handoffPhase != RF_RECOVERY_HANDOFF_IDLE)\n\t\tstatus->handoffElapsedMs =\n\t\t\t(uint32_t)(millis() - g_rfChHandoffTelemetryStartedMs);\n''')
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''static uintptr_t rfChannelJournalBase()\n{\n\treturn (uintptr_t)&g_channelJournalFlash[0];\n}\n''',
+                       '''static uintptr_t rfChannelJournalBase()\n{\n\treturn (uintptr_t)RF_CHANNEL_JOURNAL_BASE;\n}\n''')
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''\tif ((base & (RF_CHANNEL_JOURNAL_PAGE_BYTES - 1u)) != 0u ||\n\t    sizeof g_channelJournalFlash !=\n\t\t    RF_CHANNEL_JOURNAL_PAGE_BYTES *\n\t\t\t    RF_CHANNEL_JOURNAL_PAGE_COUNT) {\n\t\tg_channelJournalLiveWriteUnsafe = true;\n\t\treturn;\n\t}\n''',
+                       '''\tif ((base & (RF_CHANNEL_JOURNAL_PAGE_BYTES - 1u)) != 0u ||\n\t    rfChannelJournalFlashUsedEnd() > base) {\n\t\tg_channelJournalLiveWriteUnsafe = true;\n\t\treturn;\n\t}\n''')
+          replace_once('OpenPuck/rf_link.h',
+                       '\tuint16_t handoffElapsedMs;\n',
+                       '\tuint32_t handoffElapsedMs;\n')
+
+          replace_once('OpenPuck/fw_update.cpp',
+                       '#include "fw_update.h"\n#include "fault_diag.h"',
+                       '#include "fw_update.h"\n#include "rf_journal_layout.h"\n#include "fault_diag.h"')
+          replace_once('OpenPuck/fw_update.cpp',
+                       '''// Image cap. Also what makes the apply copy safe from self-overlap: dst ends at most at 0x26000+0x60000 =\n// 0x86000, while the staged source starts at (0xEC000-size)&~0xFFF >= 0x8C000 -- disjoint by >=24 KiB.\n#define FWUP_MAX_IMG 0x60000UL\n''',
+                       '''// The normal application ends immediately before the fixed RF-journal window.\n// The largest staged image starts at 0x8C000, leaving 16 KiB between the\n// journal end (0x88000) and staging. This keeps both update source and target\n// disjoint from learned RF history.\n#define FWUP_MAX_IMG (RF_CHANNEL_JOURNAL_BASE - FWUP_APP_BASE)\nstatic_assert(FWUP_MAX_IMG == 0x60000UL,\n\t      "RF journal layout changed the WebUSB application cap");\nstatic_assert(RF_CHANNEL_JOURNAL_END <=\n\t      ((FWUP_META - FWUP_MAX_IMG) & ~(FWUP_PAGE - 1UL)),\n\t      "RF journal overlaps staged WebUSB firmware storage");\n''')
+          replace_once('OpenPuck/fw_update.cpp',
+                       '''\tuint32_t base = (FWUP_META - size) & ~(FWUP_PAGE - 1);\n\t// keep a page of slack above the running image so staging can NEVER touch live code/rodata/.data-init\n\tif (base < flashUsedEnd() + FWUP_PAGE)\n\t\treturn FWUP_ERR_BOUNDS;\n''',
+                       '''\tuint32_t base = (FWUP_META - size) & ~(FWUP_PAGE - 1);\n\tif (base < RF_CHANNEL_JOURNAL_END)\n\t\treturn FWUP_ERR_BOUNDS;\n\t// keep a page of slack above the running image so staging can NEVER touch live code/rodata/.data-init\n\tif (base < flashUsedEnd() + FWUP_PAGE)\n\t\treturn FWUP_ERR_BOUNDS;\n''')
+
+          replace_once('OpenPuck/webusb_config.cpp',
+                       '''\t// Append-only trailers after the counted channel rows preserve the v1\n\t// header/row offsets: 4 bytes handoff telemetry + 7 bytes journal-builder\n\t// status + 1 byte ambient-survey progress + 5 bytes automatic-handoff\n\t// admission/retry diagnostics + 3 bytes ambient-survey retry/failure diagnostics.\n\tstatic uint8_t\n\t\tf[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 + 5 + 3];\n''',
+                       '''\t// Append-only trailers after the counted channel rows preserve the v1\n\t// header/row offsets: 4 bytes legacy handoff telemetry + 7 bytes journal-\n\t// builder status + 1 byte ambient-survey progress + 5 bytes automatic-\n\t// handoff admission/retry diagnostics + 3 bytes ambient-survey retry/failure\n\t// diagnostics + 4 bytes full-width handoff elapsed time.\n\tstatic uint8_t f[2 + 13 + RF_RECOVERY_STATUS_CHANNELS * 9 + 4 + 7 + 1 +\n\t\t\t 5 + 3 + 4];\n''')
+          replace_once('OpenPuck/webusb_config.cpp',
+                       '''\t*q++ = status.handoffPhase;\n\t*q++ = (uint8_t)status.handoffElapsedMs;\n\t*q++ = (uint8_t)(status.handoffElapsedMs >> 8);\n\t*q++ = status.handoffOldChannel;\n''',
+                       '''\t*q++ = status.handoffPhase;\n\tconst uint16_t legacyHandoffElapsedMs =\n\t\tstatus.handoffElapsedMs > 0xFFFFu ?\n\t\t\t0xFFFFu :\n\t\t\t(uint16_t)status.handoffElapsedMs;\n\t*q++ = (uint8_t)legacyHandoffElapsedMs;\n\t*q++ = (uint8_t)(legacyHandoffElapsedMs >> 8);\n\t*q++ = status.handoffOldChannel;\n''')
+          replace_once('OpenPuck/webusb_config.cpp',
+                       '''\t*q++ = status.ambientSurveyRetry;\n\t*q++ = status.ambientSurveyFailure;\n\t*q++ = status.ambientSurveyFailureChannel;\n\tif (tud_vendor_write_available() < sizeof f)\n''',
+                       '''\t*q++ = status.ambientSurveyRetry;\n\t*q++ = status.ambientSurveyFailure;\n\t*q++ = status.ambientSurveyFailureChannel;\n\t*q++ = (uint8_t)status.handoffElapsedMs;\n\t*q++ = (uint8_t)(status.handoffElapsedMs >> 8);\n\t*q++ = (uint8_t)(status.handoffElapsedMs >> 16);\n\t*q++ = (uint8_t)(status.handoffElapsedMs >> 24);\n\tif (tud_vendor_write_available() < sizeof f)\n''')
+
+          replace_once('docs/index.html',
+                       '''const RF_DESIG=["unexplored","good","poor","mixed"];\nfunction rfChLabel(ch){ return ch ? `Ch ${ch} · ${2400+ch} MHz` : "—"; }\nfunction applyRfStatus(p){\n''',
+                       '''const RF_DESIG=["unexplored","good","poor","mixed"];\nfunction rfChLabel(ch){ return ch ? `Ch ${ch} · ${2400+ch} MHz` : "—"; }\nfunction rfElapsedLabel(ms){\n  if(ms<1000) return `${ms} ms`;\n  const s=Math.floor(ms/1000);\n  if(s<60) return `${(ms/1000).toFixed(1)} s`;\n  const m=Math.floor(s/60);\n  if(m<60) return `${m}m ${String(s%60).padStart(2,"0")}s`;\n  const h=Math.floor(m/60);\n  if(h<24) return `${h}h ${String(m%60).padStart(2,"0")}m`;\n  const d=Math.floor(h/24);\n  return `${d}d ${String(h%24).padStart(2,"0")}h`;\n}\nfunction applyRfStatus(p){\n''')
+          replace_once('docs/index.html',
+                       '''  const hopPhase=p.length>=tail+4?p[tail]:0;\n  const hopElapsed=p.length>=tail+4?(p[tail+1]|(p[tail+2]<<8)):0;\n  const hopOld=p.length>=tail+4?p[tail+3]:0;\n''',
+                       '''  const hopPhase=p.length>=tail+4?p[tail]:0;\n  const hopElapsed16=p.length>=tail+4?(p[tail+1]|(p[tail+2]<<8)):0;\n  const hopOld=p.length>=tail+4?p[tail+3]:0;\n''')
+          replace_once('docs/index.html',
+                       '''  const surveyFailure=p.length>=surveyDiagBase+3?p[surveyDiagBase+1]:0;\n  const surveyFailureChannel=p.length>=surveyDiagBase+3?p[surveyDiagBase+2]:0;\n  const hopPhaseText=["Idle","Waiting for neutral","Authorizing","Switching","Acquiring","Reconciling","Rolling back","Reacquiring"];\n''',
+                       '''  const surveyFailure=p.length>=surveyDiagBase+3?p[surveyDiagBase+1]:0;\n  const surveyFailureChannel=p.length>=surveyDiagBase+3?p[surveyDiagBase+2]:0;\n  const handoffElapsedBase=surveyDiagBase+3;\n  const hopElapsed=p.length>=handoffElapsedBase+4?\n    ((p[handoffElapsedBase]|(p[handoffElapsedBase+1]<<8)|(p[handoffElapsedBase+2]<<16)|(p[handoffElapsedBase+3]<<24))>>>0):hopElapsed16;\n  const hopPhaseText=["Idle","Waiting for neutral","Authorizing","Switching","Acquiring","Reconciling","Rolling back","Reacquiring"];\n''')
+          replace_once('docs/index.html',
+                       '  if(hopPhase) hopText+=` · ${hopElapsed} ms`;\n',
+                       '  if(hopPhase) hopText+=` · ${rfElapsedLabel(hopElapsed)}`;\n')
+
+          # Guard against accidentally retaining the old linked journal storage.
+          rf = Path('OpenPuck/rf_link.cpp').read_text()
+          if 'g_channelJournalFlash' in rf or '.rodata.channel_journal' in rf:
+              raise SystemExit('legacy linked journal storage still present')
+          PY
+      - name: Basic patch validation
+        run: |
+          git diff --check
+          grep -q 'RF_CHANNEL_JOURNAL_BASE 0x86000UL' OpenPuck/rf_journal_layout.h
+          grep -q 'uint32_t handoffElapsedMs' OpenPuck/rf_link.h
+          grep -q 'handoffElapsedBase=surveyDiagBase+3' docs/index.html
+          ! grep -q 'g_channelJournalFlash' OpenPuck/rf_link.cpp
+      - name: Commit staging patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add OpenPuck/rf_journal_layout.h OpenPuck/rf_link.cpp OpenPuck/rf_link.h OpenPuck/fw_update.cpp OpenPuck/webusb_config.cpp docs/index.html
+          git commit -m 'RF recovery: persist journal across firmware updates'
+          git push origin HEAD:rf-recovery-journal-persist-stage
