@@ -185,6 +185,16 @@ new_jcr = (
 )
 src = replace_once(src, old_jcr, new_jcr, "hidden Joy-Con report routing")
 
+# M15 also serves control GET_REPORT for HID instance 1. Keep that fallback on
+# the same M16 mouse builder so there is no stale neutral-builder reference and
+# no second payload definition for the hidden function.
+src = replace_once(
+    src,
+    "sw2BuildJoyconRNeutral((uint8_t)bond, p);",
+    "sw2BuildJoyconRMouse((uint8_t)bond, p);",
+    "hidden GET_REPORT builder",
+)
+
 # The old common-report neutral helper is intentionally left in place. It is
 # unreachable for the M16 companion but retaining it keeps the M15 topology
 # delta minimal and makes reverting M16 straightforward.
