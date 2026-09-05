@@ -1,0 +1,143 @@
+name: Switch2Pro plus HORIPAD MDK discriminator
+
+on:
+  push:
+    branches:
+      - diag-switch2pro-plus-horipad-mdk
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out diagnostic branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact PR269 ancestry
+        run: |
+          set -eu
+          BASE=cafaba6eae52b997c685eecbaea97eb7dadfb050
+          test "$(git merge-base "$BASE" HEAD)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" -eq 2
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Apply Makerdiary MDK support only
+        run: |
+          set -eu
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          orig="$(git show "$MDK" --pretty=format: | git patch-id --stable | awk '{print $1}')"
+          applied="$(git diff --cached | git patch-id --stable | awk '{print $1}')"
+          test -n "$orig"
+          test "$orig" = "$applied"
+          git diff --cached --check
+
+      - name: Apply mixed Switch2Pro plus HORIPAD transform
+        run: |
+          set -eu
+          python3 tools/diag_switch2pro_plus_horipad.py
+          git diff --check
+          test "$(git diff --name-only | grep -c '^OpenPuck/mode_switch2_pro.cpp$')" -eq 1
+          grep -q 'SWITCH2_PRO_MIXED_HORI_DESC' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'sizeof SWITCH2_PRO_CFG_BODY == 111' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'itf->bInterfaceNumber == 2' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'sw2MixedSelectPro' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'sw2MixedSelectHori' OpenPuck/mode_switch2_pro.cpp
+          if grep -q 'TUSB_CLASS_AUDIO' OpenPuck/mode_switch2_pro.cpp; then
+            echo 'unexpected audio interface handling remains' >&2
+            exit 1
+          fi
+
+      - name: Generate diagnostic version
+        run: OPK_BUILD_VERSION="SW2PRO+HORI-MDK-cafaba6e" ./gen_version.sh
+
+      - name: Build standard target
+        run: |
+          mkdir -p build/cache/mixed-standard build/mixed-standard
+          make build BUILD_PATH=build/cache/mixed-standard OUTPUT_DIR=build/mixed-standard
+
+      - name: Build Makerdiary MDK target
+        run: make build-mdk
+
+      - name: Generate MDK UF2
+        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Switch2Pro-Plus-HORIPAD-MDK.uf2
+
+      - name: Validate UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          p=Path('build/mdk/OpenPuck-Switch2Pro-Plus-HORIPAD-MDK.uf2')
+          d=p.read_bytes()
+          if len(d)%512: raise SystemExit('bad UF2 length')
+          seen=[]; total=None; fam=None; image=bytearray(); addrs=[]
+          for off in range(0,len(d),512):
+              b=d[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('inconsistent UF2 metadata')
+              seen.append(no); addrs.append(addr)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen!=list(range(total)): raise SystemExit('non-sequential UF2 blocks')
+          if fam!=0xADA52840: raise SystemExit('wrong UF2 family')
+          if b'SW2PRO+HORI-MDK-cafaba6e' not in image: raise SystemExit('missing build marker')
+          print('PASS',len(d),total,hex(min(addrs)),hex(max(addrs)+256))
+          PY
+
+      - name: Write manifest
+        run: |
+          cat > build/mdk/Switch2Pro-Plus-HORIPAD.manifest.txt <<'EOF'
+          purpose=Switch2Pro plus one ordinary HORIPAD same-address discriminator
+          source_base=cafaba6eae52b997c685eecbaea97eb7dadfb050
+          source_role=exact reviewer-facing PR269 switch2pro head
+          mdk_patch=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          device_identity=057E:2069 Nintendo Switch 2 Pro Controller
+          interfaces=IF0 Pro2 HID; IF1 Nintendo vendor/pairing; IF2 legacy HORIPAD HID
+          audio=omitted
+          selector_L4=Pro2 HID only
+          selector_R4=HORIPAD HID only
+          default=both controller input paths neutral
+          selector_output=suppressed
+          rf_source=one live Steam Controller bond
+          reviewer_branch_switch2pro=untouched
+          EOF
+          sha256sum build/mdk/OpenPuck-Switch2Pro-Plus-HORIPAD-MDK.uf2 >> build/mdk/Switch2Pro-Plus-HORIPAD.manifest.txt
+          git diff -- OpenPuck/mode_switch2_pro.cpp > build/mdk/Switch2Pro-Plus-HORIPAD.patch
+
+      - name: Upload diagnostic package
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-Switch2Pro-Plus-HORIPAD-MDK
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-Switch2Pro-Plus-HORIPAD-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/mdk/Switch2Pro-Plus-HORIPAD.manifest.txt
+            build/mdk/Switch2Pro-Plus-HORIPAD.patch
