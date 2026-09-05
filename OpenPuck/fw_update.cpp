@@ -28,7 +28,7 @@
 static_assert(FWUP_MAX_IMG == 0x60000UL,
 	      "RF journal layout changed the WebUSB application cap");
 static_assert(RF_CHANNEL_JOURNAL_END <=
-	      ((FWUP_META - FWUP_MAX_IMG) & ~(FWUP_PAGE - 1UL)),
+		      ((FWUP_META - FWUP_MAX_IMG) & ~(FWUP_PAGE - 1UL)),
 	      "RF journal overlaps staged WebUSB firmware storage");
 
 // Capability tag, searched for BY THE PANEL inside any .uf2 it is about to flash: an image without this
