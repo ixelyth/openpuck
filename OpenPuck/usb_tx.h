@@ -25,6 +25,9 @@ class Adafruit_USBD_HID;
 void usbTxHid(Adafruit_USBD_HID *hid, uint8_t rid, const void *data,
 	      uint16_t len);
 
+// Drop all queued reports for one HID when its USB slot is remounted, preventing stale state replay.
+void usbTxFlushHid(Adafruit_USBD_HID *hid);
+
 // Kept for call-site stability; no longer does anything (the drain runs from loop() via usbTxPump). Call once.
 void usbTxBegin(void);
 

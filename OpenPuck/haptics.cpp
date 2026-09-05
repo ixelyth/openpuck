@@ -664,7 +664,7 @@ void hapticOnReconnect(int slot)
 	g_rumble80Ms[slot] = 0;
 	// Scrub haptics queued before the link came up (stale across the reconnect) -- this slot only.
 	hapticCancelPendingOn(slot);
-	if (g_usbMode == MODE_SW_PRO) {
+	if (g_usbMode == MODE_SW_PRO || g_usbMode == MODE_SW2_PRO) {
 		static const uint8_t RAW_IMU[] = {
 			SETTING_IMU_MODE,
 			SETTING_GYRO_MODE_SEND_RAW_ACCEL |
@@ -673,7 +673,7 @@ void hapticOnReconnect(int slot)
 		};
 
 		// Steam can leave the controller's persisted IMU mode off. Switch
-		// Pro reports require the raw RF samples that setting suppresses.
+		// reports require the raw RF samples that setting suppresses.
 		relayEnqueue(IBEX_CMD_SET_SETTINGS_VALUES, RAW_IMU,
 			     sizeof RAW_IMU, false, (uint8_t)slot);
 	}

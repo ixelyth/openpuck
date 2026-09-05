@@ -5,6 +5,7 @@
 #include "rf_link.h"
 #include "haptics.h"
 #include "puck_hid.h"
+#include "mode_switch2_pro.h"
 #include "triton.h" // g_in raw IMU (diagnostic readout)
 #include "lizard_map.h"
 #include "build_info.h"
@@ -22,6 +23,8 @@ Adafruit_USBD_WebUSB usb_web;
 // gives MODE_XBOX_OG first refusal on the XID requests without copying that router; whatever it declines, and
 // every other mode, must still reach __real_ -- that answers WebUSB's 0x22, whose connected flag gates
 // the panel sends.
+bool switch2ProVendorControlXfer(uint8_t rhport, uint8_t stage,
+				 const tusb_control_request_t *request);
 bool xboxOgVendorControlXfer(uint8_t rhport, uint8_t stage,
 			     const tusb_control_request_t *request);
 extern "C" bool
@@ -31,6 +34,9 @@ extern "C" bool
 __wrap_tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
 				  const tusb_control_request_t *request)
 {
+	if (g_usbMode == MODE_SW2_PRO &&
+	    switch2ProVendorControlXfer(rhport, stage, request))
+		return true;
 	if (g_usbMode == MODE_XBOX_OG &&
 	    xboxOgVendorControlXfer(rhport, stage, request))
 		return true;
@@ -100,7 +106,8 @@ static bool boardCommand(uint8_t op)
 //                [v20: p[187..194] per-type trackpad->stick map, 4x2B {left pad, right pad} (PS_OFF/LEFT/RIGHT)]
 //                [v21: p[53] rumble strength as PERCENT/2 (field 22, revived); p[195] rumble style
 //                 (field 39, RUMBLE_STYLE_* in haptics.h)]
-#define WB_PAYLEN 194
+//                p[196..203]: Switch 2 Pro L4/R4/L5/R5/View/Menu/Steam/QAM targets (fields 90..97)
+#define WB_PAYLEN 202
 // The blob send is drop-on-full (never blocks loop), so the vendor TX FIFO MUST be able to hold a whole blob
 // -- otherwise tud_vendor_write_available() never reaches the frame size and EVERY frame is dropped (blank
 // panel / stale mappings). The Makefile sets -DCFG_TUD_VENDOR_TX_BUFSIZE=256; guard it here so a build without
@@ -125,30 +132,32 @@ static void webusbSendBlob()
 	p[0] = 0xA5;
 	p[1] = WB_PAYLEN;
 
+	// Switch 2 Pro mappings use fields 90..97 and blob bytes p[196..203].
+	// Protocol v23 appends those mappings; the inherited version history follows.
 	// clang-format off
 	// protocol version
-	// (21 = +rumble style (field 39, blob p[195]) and the REVIVED rumble-strength field 22 at blob p[53], 
-	// now carrying percent/2; 
-	// 20 = +per-type trackpad->stick mapping (fields 80..87, blob p[187..194]); 
+	// (21 = +rumble style (field 39, blob p[195]) and the REVIVED rumble-strength field 22 at blob p[53],
+	// now carrying percent/2;
+	// 20 = +per-type trackpad->stick mapping (fields 80..87, blob p[187..194]);
 	// 19 = +Switch Pro legacy-gyro select (field 38, blob p[186]); the Switch report-rate and
-	// gyro-scale settings (fields 23/24, blob p[54..55]) are GONE -- those bytes read 0; 
+	// gyro-scale settings (fields 23/24, blob p[54..55]) are GONE -- those bytes read 0;
 	// 18 = +configurable back4+D-pad chords (fields 34..37, blob p[182..185]);
-	// 17 = per-type rumble field (TypeCfg k=8), per-type stride 8->9; 
+	// 17 = per-type rumble field (TypeCfg k=8), per-type stride 8->9;
 	// 16 = +configurable lizard-map ops 0x11..0x15 / 0xAA frame, payload unchanged -- the panel MUST see >=16 before it dares
 	// send 0x11, or a blocking readLizard() would hang forever against a firmware that silently drops the
-	// unknown op; 
-	// 15 = +staged firmware-update ops 0x20..0x24; 
-	// 14 = +landAll87 toggle; 
-	// 13 = +per-slot link stats; 
-	// 12 = +relay rate + clock fingerprint; 
-	// 11 = +reset cause; 
-	// 10 = +ledBright per type; 
-	// 9 = +per-type cfg; 
-	// 8 = +per-slot link status; 
-	// 7 = +raw accel; 
+	// unknown op;
+	// 15 = +staged firmware-update ops 0x20..0x24;
+	// 14 = +landAll87 toggle;
+	// 13 = +per-slot link stats;
+	// 12 = +relay rate + clock fingerprint;
+	// 11 = +reset cause;
+	// 10 = +ledBright per type;
+	// 9 = +per-type cfg;
+	// 8 = +per-slot link status;
+	// 7 = +raw accel;
 	// 6 = +swPro120/gyroScale)
 	// clang-format on
-	p[2] = 21;
+	p[2] = 23;
 	p[3] = g_usbMode;
 	p[4] = (uint8_t)g_mDiv;
 	p[5] = (uint8_t)g_mFric;
@@ -330,6 +339,10 @@ static void webusbSendBlob()
 	}
 	// v21: host-rumble style (RUMBLE_STYLE_* -- see haptics.h)
 	p[195] = g_rumbleStyle;
+	// Switch 2 Pro keeps these eight source mappings separate from
+	// generic ET_SWITCH so GL/GR/C/QAM edits cannot alter Switch Pro/HORI.
+	for (int i = 0; i < 8; i++)
+		p[196 + i] = switch2ProMapGet((uint8_t)i);
 	// CRITICAL: usb_web.write() SPINS (`while (remain && _connected) yield();`) until the IN FIFO drains or the
 	// panel disconnects. If the panel holds the WebUSB interface open but stops reading its IN endpoint -- a
 	// backgrounded tab, or the host briefly not servicing transferIn under load -- the FIFO never empties and
@@ -1047,6 +1060,18 @@ void webusbPoll()
 				// (pad 0 = left, 1 = right; value PS_OFF/PS_LEFT/PS_RIGHT).
 				// Must stay clear of the per-type cfg range 40..40+ET_COUNT*9-1
 				// (40..75), which is claimed before this switch runs.
+				// 90..96: Switch 2 Pro L4/R4/L5/R5/View/Menu/Steam targets.
+				case 90:
+				case 91:
+				case 92:
+				case 93:
+				case 94:
+				case 95:
+				case 96:
+				case 97:
+					switch2ProMapSet((uint8_t)(f - 90), v);
+					break;
+
 				case 80:
 				case 81:
 				case 82:

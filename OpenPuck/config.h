@@ -58,7 +58,9 @@
 // SInput: the open SDL-native gamepad protocol (docs.handheldlegend.com/s/sinput). Sticks + analog triggers +
 // gyro/accel + BOTH trackpads + battery, all bound natively by SDL3 / Steam Input with no impersonation.
 #define MODE_SINPUT 12
-#define MODE_MAX 12
+// Nintendo Switch 2 Pro Controller (057E:2069), clean console personality.
+#define MODE_SW2_PRO 13
+#define MODE_MAX 13
 
 // The two "game" personalities drop the wake-mouse + WebUSB interfaces so the device is a genuine single-HID PS
 // controller (some PC games -- e.g. Fortnite/UE GameInput -- refuse PS classification when extra interfaces are
@@ -68,6 +70,12 @@ static inline bool modeIsCleanPS(uint8_t m)
 	return m == MODE_PS5_GAME || m == MODE_DS4_GAME || m == MODE_PS3;
 }
 
+// Switch 2 Pro is a clean console personality with its captured composite USB topology. PS3 remains
+// separate because it has a distinct USB bmAttributes policy.
+static inline bool modeIsCleanConsole(uint8_t m)
+{
+	return modeIsCleanPS(m) || m == MODE_SW2_PRO;
+}
 static inline bool modeIsPuck(uint8_t m)
 {
 	return m == MODE_STEAM || m == MODE_LIZARD;
@@ -96,6 +104,7 @@ static inline uint8_t etypeForMode(uint8_t m)
 		return ET_XBOX;
 	case MODE_SW_HORI:
 	case MODE_SW_PRO:
+	case MODE_SW2_PRO:
 		return ET_SWITCH;
 	case MODE_HIDGYRO:
 	case MODE_DS4_GAME:
@@ -147,7 +156,7 @@ void armDebugCdcNextBoot(); // persist the one-shot (caller reboots)
 extern int g_mDiv, g_mFric; // xbox/lizard mouse sensitivity divisor / friction%
 
 // Per-emulated-type button config. One entry per ET_* type. back[] = paddle L4,R4,L5,R5 -> button codes
-// (0..15 standard, 16=PS Touch Click, 17=PS5 Mute, 18=Switch Capture/Screenshot). qamMap = QAM (3 dots)
+// (0..15 standard, 16=PS Touch Click, 17=PS5 Mute, 18=Switch Capture/Screenshot, 21=Switch 2 Chat). qamMap = QAM (3 dots)
 // physical button -> same code space (0 = default/unmapped). abSwap = swap A/B and X/Y (Nintendo layout).
 // padHaptics = 1 keeps the controller's autonomous trackpad haptics, 0 disables them for this type.
 // rumble = 1 enables host rumble relay (default), 0 silences it for this type.
@@ -223,6 +232,10 @@ extern uint32_t g_pollUs;
 extern uint16_t g_loopPeriodUs;
 extern uint8_t g_loopWorst;
 extern uint16_t g_loopWorstUs;
+
+#define CFG_EXT_STORAGE_BYTES 11u
+uint8_t cfgExtRead(uint8_t index);
+void cfgExtWrite(uint8_t index, uint8_t value);
 
 void loadCfg();
 void saveCfg();
