@@ -1,0 +1,333 @@
+name: F27-M27 coherent proven-builder session1 LEFT-pad probe
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m27-proven-session1-left-jcr
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M27
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Recover pinned M15 M3 M21 M22 M25 composition tools
+        run: |
+          set -eu
+          git fetch origin \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250 \
+            2f990e0f3e9401a734427e23e8223f2b9f1be799 \
+            5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8 \
+            fb3ac5f57a2d379b8849d84637c956c05e4a204e
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 2f990e0f3e9401a734427e23e8223f2b9f1be799:tools/f27_switch2pro_m21.py > tools/f27_switch2pro_m21.py
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+          git show fb3ac5f57a2d379b8849d84637c956c05e4a204e:tools/f27_switch2pro_m25.py > tools/f27_switch2pro_m25.py
+
+      - name: Compose exact hardware-positive M25 runtime
+        run: |
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m25.py
+
+      - name: Freeze exact M25 witness
+        run: |
+          set -eu
+          cp OpenPuck/OpenPuck.ino /tmp/m25-OpenPuck.ino
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/m25-mode_switch2_pro.cpp
+          cp OpenPuck/f27_joycon2.cpp /tmp/m25-f27_joycon2.cpp
+          cp OpenPuck/f27_joycon2.h /tmp/m25-f27_joycon2.h
+
+      - name: Apply M27 coherent session1 probe
+        run: python3 tools/f27_switch2pro_m27.py
+
+      - name: Prove M27 scope and frozen session0 builder
+        run: |
+          set -eu
+          cmp /tmp/m25-OpenPuck.ino OpenPuck/OpenPuck.ino
+          python3 - <<'PY'
+          from pathlib import Path
+
+          before_mode = Path('/tmp/m25-mode_switch2_pro.cpp').read_text()
+          after_mode = Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          before_joy = Path('/tmp/m25-f27_joycon2.cpp').read_text()
+          after_joy = Path('OpenPuck/f27_joycon2.cpp').read_text()
+          before_hdr = Path('/tmp/m25-f27_joycon2.h').read_text()
+          after_hdr = Path('OpenPuck/f27_joycon2.h').read_text()
+
+          def function_text(src, name):
+              start = src.find('bool ' + name + '(')
+              if start < 0:
+                  raise SystemExit('missing function ' + name)
+              brace = src.find('{', start)
+              depth = 0
+              for i in range(brace, len(src)):
+                  if src[i] == '{':
+                      depth += 1
+                  elif src[i] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          return src[start:i+1]
+              raise SystemExit('unterminated function ' + name)
+
+          # Highest-value invariant: the hardware-positive session0 native builder
+          # must remain literally identical to M25.
+          if function_text(before_joy, 'f27JoyconBuildNative') != function_text(after_joy, 'f27JoyconBuildNative'):
+              raise SystemExit('M27 changed hardware-positive f27JoyconBuildNative session0 implementation')
+
+          for anchor in [
+              'if (g_sw2SessionCtx == M15_SW2_PRO)\n\t\tout[5] ^= 0x01u;',
+              "if (g_sw2SessionCtx == M15_SW2_PRO) {\n\t\tconst uint32_t serialTail",
+              's != M15_SW2_JOYCON_R',
+          ]:
+              if anchor not in before_mode or anchor not in after_mode:
+                  raise SystemExit('M25 invariant missing after M27: ' + anchor)
+
+          if 'F27-M26-INPUT-PAYLOAD-SWAP-JCR' in after_mode:
+              raise SystemExit('M26 must not be composed into M27')
+          if 'F27-M23-JCR-JCL-LEFT-MOUSE' in after_mode or 'F27-M24-ROLE-SWAP-JCR' in after_mode:
+              raise SystemExit('forbidden M23/M24 experiment marker present')
+          if 'F27-M27-PROVEN-SESSION1-LEFT-JCR' not in after_mode:
+              raise SystemExit('M27 marker missing')
+          if after_mode.count('f27JoyconBuildM27Session1Left') != 2:
+              raise SystemExit('M27 must route exactly session1 periodic + GET_REPORT through the new builder')
+          if 'm27BuildSession1Left' not in after_joy or 'g_m27Session1Left' not in after_joy:
+              raise SystemExit('M27 independent session1 builder/state missing')
+          if after_joy.count('f27JoyconBuildM27Session1Left') != 1:
+              raise SystemExit('unexpected M27 exported-builder count')
+          if after_hdr.count('f27JoyconBuildM27Session1Left') != 1:
+              raise SystemExit('unexpected M27 header declaration count')
+
+          # Existing M22 helper remains present only as historical composed code;
+          # M27 must no longer use it for session1 periodic or GET_REPORT traffic.
+          periodic_old = 'm22BuildHiddenLeftMouse((uint8_t)bond, p);'
+          if after_mode.count(periodic_old) != 0:
+              raise SystemExit('M22 custom helper still used by M27 session traffic')
+
+          # Prove the new session1 builder preserves the M3/JCR steady-state
+          # report layout while sourcing only mouse motion/touch from LEFT pad.
+          for anchor in [
+              'bool touch = (buttons & TB_LPADT) != 0;',
+              'g_in[slot].lpx, g_in[slot].lpy',
+              'rightButtons(slot, out + 2, surface);',
+              'out[4] = 0x07;',
+              'out[8] = 0x38;',
+              'packStick(out + 5, g_in[slot].rx, g_in[slot].ry);',
+              'flatMouseCarrier(state, carrier);',
+              '*reportId = 0x08;',
+          ]:
+              if anchor not in after_joy:
+                  raise SystemExit('M27 proven-layout/source witness missing: ' + anchor)
+
+          # Header/source may only gain the M27 API/state/helper; existing native
+          # entrypoint has already been proven byte-identical above.
+          if len(after_hdr) <= len(before_hdr) or len(after_joy) <= len(before_joy):
+              raise SystemExit('M27 expected additive Joy-Con helper changes only')
+
+          print('M27 frozen session0 + coherent session1 source witness PASS')
+          PY
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Format and verify M27 source
+        run: |
+          set -eu
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'F27-M27-PROVEN-SESSION1-LEFT-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M26-INPUT-PAYLOAD-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M24-ROLE-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'f27JoyconBuildM27Session1Left' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'f27JoyconBuildM27Session1Left' OpenPuck/f27_joycon2.cpp
+          grep -q 'TB_LPADT' OpenPuck/f27_joycon2.cpp
+          grep -q 'out\[8\] = 0x38' OpenPuck/f27_joycon2.cpp
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build standard F27-M27 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M27-S1LEFT-${short}" ./gen_version.sh
+          mkdir -p build/f27-standard build/cache/f27-standard
+          make build \
+            BUILD_PATH=build/cache/f27-standard \
+            OUTPUT_DIR=build/f27-standard \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/f27-standard/OpenPuck.ino.hex \
+            build/f27-standard/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-standard.uf2
+          cp build/f27-standard/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-standard.uf2 /tmp/
+          cp build/f27-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M27-standard.hex
+
+      - name: Compose current-main Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Recompose exact M27 over Makerdiary build
+        run: |
+          set -eu
+          git fetch origin \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250 \
+            2f990e0f3e9401a734427e23e8223f2b9f1be799 \
+            5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8 \
+            fb3ac5f57a2d379b8849d84637c956c05e4a204e
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 2f990e0f3e9401a734427e23e8223f2b9f1be799:tools/f27_switch2pro_m21.py > tools/f27_switch2pro_m21.py
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+          git show fb3ac5f57a2d379b8849d84637c956c05e4a204e:tools/f27_switch2pro_m25.py > tools/f27_switch2pro_m25.py
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m25.py
+          python3 tools/f27_switch2pro_m27.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          test ! -e OpenPuck/git_version.h
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-M27-PROVEN-SESSION1-LEFT-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M26-INPUT-PAYLOAD-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+
+      - name: Build Makerdiary MDK F27-M27 target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M27-S1LEFT-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-MDK.uf2
+          mkdir -p build/f27-standard
+          cp /tmp/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-standard.uf2 build/f27-standard/
+          cp /tmp/OpenPuck-F27-M27-standard.hex build/f27-standard/OpenPuck.ino.hex
+
+      - name: Validate M27 artifact identity
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, struct
+          build=("F27-M27-S1LEFT-"+os.environ['GITHUB_SHA'][:8]).encode()
+          marker=b'F27-M27-PROVEN-SESSION1-LEFT-JCR'
+          retained=[b'F27-M22-HIDDEN-JCR-LEFT-MOUSE', b'F27-M25-IDENTITY-SWAP-JCR']
+          forbidden=[b'F27-M23-JCR-JCL-LEFT-MOUSE', b'F27-M24-ROLE-SWAP-JCR', b'F27-M26-INPUT-PAYLOAD-SWAP-JCR']
+          for path in [
+              'build/f27-standard/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-standard.uf2',
+              'build/mdk/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-MDK.uf2',
+          ]:
+              data=Path(path).read_bytes()
+              if len(data)%512: raise SystemExit(f'non-UF2 length: {path}')
+              image=bytearray(); seen=[]; total=None; fam=None; flags_seen=None; addrs=[]
+              for off in range(0,len(data),512):
+                  b=data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit(f'bad magic: {path}')
+                  total=nblocks if total is None else total
+                  fam=family if fam is None else fam
+                  flags_seen=flags if flags_seen is None else flags_seen
+                  if nblocks!=total or family!=fam or flags!=flags_seen:
+                      raise SystemExit(f'inconsistent metadata: {path}')
+                  seen.append(no)
+                  if addr>=0x26000:
+                      image += b[32:32+size]; addrs.append(addr)
+              if seen != list(range(total)): raise SystemExit(f'non-sequential blocks: {path}')
+              if marker not in image: raise SystemExit(f'missing M27 marker: {path}')
+              if build not in image: raise SystemExit(f'missing M27 build label: {path}')
+              for x in retained:
+                  if x not in image: raise SystemExit(f'missing retained marker {x!r}: {path}')
+              for x in forbidden:
+                  if x in image: raise SystemExit(f'forbidden marker {x!r}: {path}')
+              print(path,'PASS','blocks',total,'flags',hex(flags_seen),'family',hex(fam),'range',hex(min(addrs)),hex(max(addrs)+256))
+          PY
+
+      - name: Record experiment manifest
+        run: |
+          cat > build/F27-M27-ProvenSession1Left-JoyConR.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          m20_hardware_positive=6c2e191693fec0baadeeda8938275e6d04a5463b
+          m21_dual_topology=2f990e0f3e9401a734427e23e8223f2b9f1be799
+          m22_hidden_custom_helper=5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8
+          m25_hardware_positive=fb3ac5f57a2d379b8849d84637c956c05e4a204e
+          m25_hardware_result=one Joy-Con2-R; ordinary controls and RIGHT trackpad work; LEFT hidden custom helper does not
+          m26_hardware_fail=f165e36585a2881fcb9a1f76ba5407ee0db8dc5b
+          m26_hardware_result=no controller; no inputs; custom LEFT helper invalid/confounded as topology witness
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          target=F27-M27-ProvenSession1Left-JoyConR
+          topology=identical dual Joy-Con2-R descriptor/function topology as M25
+          session0=exact M25 hardware-positive native builder and behavior unchanged
+          session1=Joy-Con2-R native 0x08 coherent M3-layout builder with independent state and LEFT Steam trackpad mouse source
+          session1_get_report=coherent with the same M27 session1 builder
+          identity=exact M25 address+serial role arrangement
+          output_rumble=unchanged M25 session0 ownership
+          purpose=validate second Nintendo USB function with a payload stack whose report semantics match the hardware-proven M3/JCR path
+          result_if_left_absent=strong support that session1 is not consumed even with coherent proven payload semantics
+          result_if_left_present=decisive evidence session1 can contribute input despite one visible Joy-Con
+          result_if_no_controller=fully live coherent second stream causes registration/session conflict rather than simple ignore
+          EOF
+          sha256sum build/f27-standard/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-standard.uf2 >> build/F27-M27-ProvenSession1Left-JoyConR.manifest.txt
+          sha256sum build/mdk/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-MDK.uf2 >> build/F27-M27-ProvenSession1Left-JoyConR.manifest.txt
+
+      - name: Upload F27-M27 target
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M27-ProvenSession1Left-JoyConR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/f27-standard/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-standard.uf2
+            build/f27-standard/OpenPuck.ino.hex
+            build/mdk/OpenPuck-F27-M27-ProvenSession1Left-JoyConR-MDK.uf2
+            build/mdk/OpenPuck.ino.hex
+            build/F27-M27-ProvenSession1Left-JoyConR.manifest.txt
