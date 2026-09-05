@@ -189,7 +189,7 @@ struct RfRecoveryStatus {
 	uint32_t journalSequence;
 	RfChannelStatusEntry channel[RF_RECOVERY_STATUS_CHANNELS];
 	uint8_t handoffPhase;
-	uint16_t handoffElapsedMs;
+	uint64_t handoffElapsedMs;
 	uint8_t handoffOldChannel;
 	uint8_t journalBuilderPhase;
 	uint8_t journalBuilderIndex;

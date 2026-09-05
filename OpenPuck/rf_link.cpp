@@ -1,4 +1,5 @@
 #include "rf_link.h"
+#include "rf_journal_layout.h"
 #include "radio.h"
 #include "bonds.h"
 #include "config.h"
@@ -116,8 +117,6 @@ static bool g_channelRecoveryDecidedThisResidence = false;
 #define RF_CHANNEL_HISTORY_PERSIST_MAX_WRITES_PER_BOOT 4u
 #define RF_CHANNEL_HISTORY_PERSIST_MIN_INTERVAL_MS 30000u
 #define RF_CHANNEL_JOURNAL_FORMAT 2u
-#define RF_CHANNEL_JOURNAL_PAGE_BYTES 4096u
-#define RF_CHANNEL_JOURNAL_PAGE_COUNT 2u
 #define RF_CHANNEL_JOURNAL_WORD_INTERVAL_US 8000u
 #define RF_CHANNEL_JOURNAL_LIVE_WORD_MAX_US 250u
 #define RF_CHANNEL_JOURNAL_TIMER3_TICKS_PER_US 16u
@@ -266,38 +265,34 @@ static void rfJournalBuilderResetQualityWindows()
 	g_qosCheckMs = g_linkQualityCheckMs;
 }
 
-// Reserve two complete, page-aligned application-flash pages. The linker maps
-// .rodata.* only inside application FLASH, whose upper bound is the InternalFS
-// start (0xED000 on nRF52840). Therefore these pages cannot alias LittleFS or
-// bootloader storage, and an oversized image fails at link time rather than
-// silently colliding with persistence.
-#define CHANNEL_JOURNAL_FF1 0xFFFFFFFFu
-#define CHANNEL_JOURNAL_FF2 CHANNEL_JOURNAL_FF1, CHANNEL_JOURNAL_FF1
-#define CHANNEL_JOURNAL_FF4 CHANNEL_JOURNAL_FF2, CHANNEL_JOURNAL_FF2
-#define CHANNEL_JOURNAL_FF8 CHANNEL_JOURNAL_FF4, CHANNEL_JOURNAL_FF4
-#define CHANNEL_JOURNAL_FF16 CHANNEL_JOURNAL_FF8, CHANNEL_JOURNAL_FF8
-#define CHANNEL_JOURNAL_FF32 CHANNEL_JOURNAL_FF16, CHANNEL_JOURNAL_FF16
-#define CHANNEL_JOURNAL_FF64 CHANNEL_JOURNAL_FF32, CHANNEL_JOURNAL_FF32
-#define CHANNEL_JOURNAL_FF128 CHANNEL_JOURNAL_FF64, CHANNEL_JOURNAL_FF64
-#define CHANNEL_JOURNAL_FF256 CHANNEL_JOURNAL_FF128, CHANNEL_JOURNAL_FF128
-#define CHANNEL_JOURNAL_FF512 CHANNEL_JOURNAL_FF256, CHANNEL_JOURNAL_FF256
-#define CHANNEL_JOURNAL_FF1024 CHANNEL_JOURNAL_FF512, CHANNEL_JOURNAL_FF512
-#define CHANNEL_JOURNAL_FF2048 CHANNEL_JOURNAL_FF1024, CHANNEL_JOURNAL_FF1024
-__attribute__((used, aligned(RF_CHANNEL_JOURNAL_PAGE_BYTES),
-	       section(".rodata.channel_journal"))) static const uint32_t
-	g_channelJournalFlash[2048] = { CHANNEL_JOURNAL_FF2048 };
-#undef CHANNEL_JOURNAL_FF2048
-#undef CHANNEL_JOURNAL_FF1024
-#undef CHANNEL_JOURNAL_FF512
-#undef CHANNEL_JOURNAL_FF256
-#undef CHANNEL_JOURNAL_FF128
-#undef CHANNEL_JOURNAL_FF64
-#undef CHANNEL_JOURNAL_FF32
-#undef CHANNEL_JOURNAL_FF16
-#undef CHANNEL_JOURNAL_FF8
-#undef CHANNEL_JOURNAL_FF4
-#undef CHANNEL_JOURNAL_FF2
-#undef CHANNEL_JOURNAL_FF1
+// The journal occupies a fixed flash window outside the linked application
+// image. The WebUSB updater caps normal images below this address and stages
+// incoming data above the journal, so neither update path aliases learned RF
+// history. If a future build grows into the reserved window, persistence fails
+// closed instead of writing over live firmware.
+extern "C" {
+extern uint32_t __etext[];
+extern uint32_t __data_start__[];
+extern uint32_t __data_end__[];
+}
+static uintptr_t rfChannelJournalFlashUsedEnd()
+{
+	return (uintptr_t)__etext +
+	       ((uintptr_t)__data_end__ - (uintptr_t)__data_start__);
+}
+
+// This NOBITS section reserves the fixed journal window in the linker address
+// map without emitting bytes into HEX/UF2. The Makefile pins this section to
+// RF_CHANNEL_JOURNAL_BASE; if linked application data grows into the window,
+// GNU ld rejects the overlap before a firmware artifact can be produced. The
+// exported symbol is referenced by rfChannelJournalBase(), so --gc-sections
+// cannot discard the reservation as an otherwise-unreferenced input section.
+extern "C" uint8_t g_rfChannelJournalGuard[];
+__asm__(".section .rf_journal_guard,\"a\",%nobits\n"
+	".global g_rfChannelJournalGuard\n"
+	"g_rfChannelJournalGuard:\n"
+	".space 8192\n"
+	".previous\n");
 
 struct RfChannelJournalRecord {
 	uint32_t magic;
@@ -399,9 +394,11 @@ static uint8_t g_rfChHandoffOld = 0;
 static uint8_t g_rfChHandoffTarget = 0;
 static uint8_t g_rfChHandoffMask = 0;
 static unsigned long g_rfChHandoffStartedMs = 0;
-// Separate from g_rfChHandoffStartedMs: authorization resets that timer for the host-grace window,
-// while the panel needs elapsed time from the original recovery request.
-static unsigned long g_rfChHandoffTelemetryStartedMs = 0;
+// Separate from g_rfChHandoffStartedMs: authorization resets that timer for the
+// host-grace window. Accumulating loop-to-loop deltas keeps panel telemetry
+// correct across the 32-bit millis() wrap without affecting handoff admission.
+static uint64_t g_rfChHandoffTelemetryElapsedMs = 0;
+static uint32_t g_rfChHandoffTelemetryLastMs = 0;
 static unsigned long g_rfChHandoffPhaseMs = 0;
 static bool g_rfChHandoffRequireActivityCycle = true;
 static bool g_rfChHandoffManualImmediate = false;
@@ -1216,12 +1213,8 @@ void rfRecoveryStatusSnapshot(RfRecoveryStatus *status)
 	status->journalSequence = g_channelJournalSequence;
 	status->handoffPhase = rfRecoveryHandoffPhase();
 	status->handoffOldChannel = g_rfChHandoffOld;
-	if (status->handoffPhase != RF_RECOVERY_HANDOFF_IDLE) {
-		const uint32_t elapsed =
-			(uint32_t)(millis() - g_rfChHandoffTelemetryStartedMs);
-		status->handoffElapsedMs =
-			elapsed > 0xFFFFu ? 0xFFFFu : (uint16_t)elapsed;
-	}
+	if (status->handoffPhase != RF_RECOVERY_HANDOFF_IDLE)
+		status->handoffElapsedMs = g_rfChHandoffTelemetryElapsedMs;
 	status->journalBuilderPhase = g_rfJournalBuilderPhase;
 	status->journalBuilderIndex = g_rfJournalBuilderIndex;
 	status->journalBuilderChannel = g_rfJournalBuilderChannel;
@@ -1276,7 +1269,7 @@ static uint32_t rfChannelJournalCrc32(const void *data, size_t len)
 
 static uintptr_t rfChannelJournalBase()
 {
-	return (uintptr_t)&g_channelJournalFlash[0];
+	return (uintptr_t)&g_rfChannelJournalGuard[0];
 }
 
 static uintptr_t rfChannelJournalSlotAddress(uint16_t slot)
@@ -1439,10 +1432,9 @@ static void rfChannelJournalLoad()
 	g_channelHistoryPersistentLoaded = true;
 	rfChannelJournalCheckSoftDevice();
 	const uintptr_t base = rfChannelJournalBase();
-	if ((base & (RF_CHANNEL_JOURNAL_PAGE_BYTES - 1u)) != 0u ||
-	    sizeof g_channelJournalFlash !=
-		    RF_CHANNEL_JOURNAL_PAGE_BYTES *
-			    RF_CHANNEL_JOURNAL_PAGE_COUNT) {
+	if (base != (uintptr_t)RF_CHANNEL_JOURNAL_BASE ||
+	    (base & (RF_CHANNEL_JOURNAL_PAGE_BYTES - 1u)) != 0u ||
+	    rfChannelJournalFlashUsedEnd() > base) {
 		g_channelJournalLiveWriteUnsafe = true;
 		return;
 	}
@@ -2945,7 +2937,8 @@ static void rfChannelGroupReset()
 	g_rfChGroupNeutralStartValid = false;
 	g_rfChGroupNeutralStartMs = 0;
 	g_rfChHandoffManualImmediate = false;
-	g_rfChHandoffTelemetryStartedMs = 0;
+	g_rfChHandoffTelemetryElapsedMs = 0;
+	g_rfChHandoffTelemetryLastMs = 0;
 	g_rfChHandoffWaitReason = RF_RECOVERY_WAIT_NONE;
 	g_rfChHandoffNeutralMs = 0;
 	memset(g_rfChGroupActivitySeqSeen, 0,
@@ -2994,7 +2987,8 @@ static bool rfChannelGroupBegin(uint8_t oldCh, uint8_t newCh, uint8_t mask,
 	g_rfChHandoffTarget = newCh;
 	g_rfChHandoffMask = mask;
 	g_rfChHandoffStartedMs = now;
-	g_rfChHandoffTelemetryStartedMs = now;
+	g_rfChHandoffTelemetryElapsedMs = 0;
+	g_rfChHandoffTelemetryLastMs = (uint32_t)now;
 	g_rfChHandoffPhaseMs = now;
 	g_rfChHandoffRequireActivityCycle = true;
 	g_rfChHandoffManualImmediate = manualImmediate;
@@ -3105,6 +3099,10 @@ static void rfChannelGroupHandoffTask(unsigned long now)
 {
 	if (!g_rfChGroupActive)
 		return;
+
+	g_rfChHandoffTelemetryElapsedMs +=
+		(uint32_t)((uint32_t)now - g_rfChHandoffTelemetryLastMs);
+	g_rfChHandoffTelemetryLastMs = (uint32_t)now;
 
 	if (g_rfChGroupPhase == RF_GROUP_HOP_PENDING) {
 		if (g_rfChHandoffManualImmediate) {
