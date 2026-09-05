@@ -1,0 +1,278 @@
+name: F27-M28 distinct-USB Pro2 plus Joy-Con-R native mouse topology kit
+
+on:
+  push:
+    branches:
+      - f27-switch2pro-m28-distinct-usb-pro2-jcr
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out F27-M28
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Prove experiment branch leaves runtime base untouched
+        run: |
+          set -eu
+          git diff --check 1b4c0fae82489ab6034004c69ed6c8979268eb03..HEAD
+          git diff --exit-code 1b4c0fae82489ab6034004c69ed6c8979268eb03..HEAD -- OpenPuck Makefile
+          python3 -m py_compile tools/f27_switch2pro_m28.py
+
+      - name: Recover exact M20 M3 composition tools
+        run: |
+          set -eu
+          git fetch origin 6c2e191693fec0baadeeda8938275e6d04a5463b
+          for f in f27_joycon2_poc.py f27_joycon2_m1.py f27_joycon2_m2.py f27_joycon2_m3.py; do
+            git show 6c2e191693fec0baadeeda8938275e6d04a5463b:tools/$f > /tmp/$f
+            python3 -m py_compile /tmp/$f
+          done
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        # Keep both packages intentionally unpinned, matching project policy.
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Build Device A plain Pro2 standard target
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          test -z "$(git diff --name-only)"
+          make check
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M28-A-PRO2-${short}" ./gen_version.sh
+          mkdir -p build/m28-a-standard build/cache/m28-a-standard
+          make build BUILD_PATH=build/cache/m28-a-standard OUTPUT_DIR=build/m28-a-standard
+          ./gen_uf2.sh build/m28-a-standard/OpenPuck.ino.hex \
+            build/m28-a-standard/OpenPuck-F27-M28-A-Pro2-standard.uf2
+          cp build/m28-a-standard/OpenPuck-F27-M28-A-Pro2-standard.uf2 /tmp/
+          cp build/m28-a-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M28-A-Pro2-standard.hex
+
+      - name: Compose Makerdiary support for Device A
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --check
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          git diff --name-only | sort > /tmp/m28-device-a-mdk-delta.txt
+
+      - name: Build Device A plain Pro2 Makerdiary target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M28-A-PRO2-${short}" ./gen_version.sh
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M28-A-Pro2-MDK.uf2
+          cp build/mdk/OpenPuck-F27-M28-A-Pro2-MDK.uf2 /tmp/
+          cp build/mdk/OpenPuck.ino.hex /tmp/OpenPuck-F27-M28-A-Pro2-MDK.hex
+
+      - name: Compose Device B exact M20 M3 plus synthetic source
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          python3 /tmp/f27_joycon2_poc.py
+          python3 /tmp/f27_joycon2_m1.py
+          python3 /tmp/f27_joycon2_m2.py
+          python3 /tmp/f27_joycon2_m3.py
+          python3 tools/f27_switch2pro_m28.py
+          make format
+          make check
+          git diff --check
+          test "$(git diff --name-only | sort)" = "$(printf '%s\n' OpenPuck/f27_joycon2.cpp OpenPuck/mode_switch2_pro.cpp | sort)"
+          grep -q 'bool requestedMouse = true' OpenPuck/f27_joycon2.cpp
+          grep -q 'F27-M28-DISTINCT-USB-JCR-SYNTH' OpenPuck/f27_joycon2.cpp
+          grep -q 'state.counter & 0x40u' OpenPuck/f27_joycon2.cpp
+          grep -q 'if (surface)' OpenPuck/f27_joycon2.cpp
+
+      - name: Build Device B synthetic Joy-Con-R standard target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M28-B-JCRSYN-${short}" ./gen_version.sh
+          mkdir -p build/m28-b-standard build/cache/m28-b-standard
+          make build \
+            BUILD_PATH=build/cache/m28-b-standard \
+            OUTPUT_DIR=build/m28-b-standard \
+            EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2 -DOPK_F27_M28_SYNTH_MOUSE=1"
+          ./gen_uf2.sh build/m28-b-standard/OpenPuck.ino.hex \
+            build/m28-b-standard/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-standard.uf2
+          cp build/m28-b-standard/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-standard.uf2 /tmp/
+          cp build/m28-b-standard/OpenPuck.ino.hex /tmp/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-standard.hex
+
+      - name: Recompose Device B over identical Makerdiary support
+        run: |
+          set -eu
+          git reset --hard "$GITHUB_SHA"
+          git clean -fdx
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          python3 /tmp/f27_joycon2_poc.py
+          python3 /tmp/f27_joycon2_m1.py
+          python3 /tmp/f27_joycon2_m2.py
+          python3 /tmp/f27_joycon2_m3.py
+          python3 tools/f27_switch2pro_m28.py
+          make format
+          make check
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          a = set(Path('/tmp/m28-device-a-mdk-delta.txt').read_text().splitlines())
+          b = set(__import__('subprocess').check_output(['git','diff','--name-only'], text=True).splitlines())
+          allowed = a | {'OpenPuck/f27_joycon2.cpp', 'OpenPuck/mode_switch2_pro.cpp'}
+          extra = b - allowed
+          missing_base = a - b
+          if extra or missing_base:
+              raise SystemExit(f'M28 Device B scope mismatch extra={sorted(extra)} missing_mdk_base={sorted(missing_base)}')
+          print('M28 Device B scope PASS', sorted(b))
+          PY
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'F27-M28-DISTINCT-USB-JCR-SYNTH' OpenPuck/f27_joycon2.cpp
+
+      - name: Build Device B synthetic Joy-Con-R Makerdiary target
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M28-B-JCRSYN-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2 -DOPK_F27_M28_SYNTH_MOUSE=1"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-MDK.uf2
+          cp build/mdk/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-MDK.uf2 /tmp/
+          cp build/mdk/OpenPuck.ino.hex /tmp/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-MDK.hex
+
+      - name: Assemble and validate M28 two-device kit
+        run: |
+          set -eu
+          mkdir -p build/m28-kit
+          cp /tmp/OpenPuck-F27-M28-A-Pro2-standard.uf2 build/m28-kit/
+          cp /tmp/OpenPuck-F27-M28-A-Pro2-standard.hex build/m28-kit/
+          cp /tmp/OpenPuck-F27-M28-A-Pro2-MDK.uf2 build/m28-kit/
+          cp /tmp/OpenPuck-F27-M28-A-Pro2-MDK.hex build/m28-kit/
+          cp /tmp/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-standard.uf2 build/m28-kit/
+          cp /tmp/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-standard.hex build/m28-kit/
+          cp /tmp/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-MDK.uf2 build/m28-kit/
+          cp /tmp/OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-MDK.hex build/m28-kit/
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, struct
+          short = os.environ['GITHUB_SHA'][:8].encode()
+          expected = {
+              'OpenPuck-F27-M28-A-Pro2-standard.uf2': (b'F27-M28-A-PRO2-' + short, False),
+              'OpenPuck-F27-M28-A-Pro2-MDK.uf2': (b'F27-M28-A-PRO2-' + short, False),
+              'OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-standard.uf2': (b'F27-M28-B-JCRSYN-' + short, True),
+              'OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-MDK.uf2': (b'F27-M28-B-JCRSYN-' + short, True),
+          }
+          marker = b'F27-M28-DISTINCT-USB-JCR-SYNTH'
+          for name, (label, should_marker) in expected.items():
+              p = Path('build/m28-kit') / name
+              data = p.read_bytes()
+              if len(data) % 512: raise SystemExit(f'non-UF2 length {name}')
+              image = bytearray(); seen=[]; total=None; fam=None; addrs=[]
+              for off in range(0, len(data), 512):
+                  b = data[off:off+512]
+                  m0,m1,flags,addr,size,no,nblocks,family = struct.unpack_from('<IIIIIIII', b, 0)
+                  if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit(f'bad magic {name}')
+                  if b[508:512] != struct.pack('<I', 0x0AB16F30): raise SystemExit(f'bad trailer {name}')
+                  total = nblocks if total is None else total
+                  fam = family if fam is None else fam
+                  if nblocks != total or family != fam: raise SystemExit(f'inconsistent metadata {name}')
+                  seen.append(no)
+                  if addr >= 0x26000:
+                      image += b[32:32+size]; addrs.append(addr)
+              if seen != list(range(total)): raise SystemExit(f'non-sequential {name}')
+              if fam != 0xADA52840: raise SystemExit(f'wrong family {name}: {fam:#x}')
+              if label not in image: raise SystemExit(f'missing build label {name}')
+              has_marker = marker in image
+              if has_marker != should_marker: raise SystemExit(f'M28 marker mismatch {name}: {has_marker}')
+              print(name, 'PASS', 'blocks', total, 'range', hex(min(addrs)), hex(max(addrs)+256), 'marker', has_marker)
+          PY
+
+      - name: Record M28 manifest and hardware procedure
+        run: |
+          cat > build/m28-kit/F27-M28-DistinctUSB-Pro2-JoyConR.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          runtime_base=1b4c0fae82489ab6034004c69ed6c8979268eb03
+          runtime_base_tree=530264b182ea3f3f9b7bbbc32670039d01b40eea
+          m20_composition_authority=6c2e191693fec0baadeeda8938275e6d04a5463b
+          m20_hardware_lkg=JoyCon2-R native report08 + right Steam trackpad mouse PASS
+          makerdiary_authority=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          makerdiary_current_main_composition=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          device_a=plain reconciled Switch2Pro; no M28 runtime source changes
+          device_b=exact M20/M3 JoyCon2-R contract plus M28 synthetic mouse source only
+          device_b_define=OPK_F27_JOYCON_TARGET=2 OPK_F27_M28_SYNTH_MOUSE=1
+          topology=two physically independent USB device controllers through external hub; distinct device addresses/EP0
+          purpose=prove simultaneous Pro2 registration/usability plus independent native JoyCon2-R mouse semantics before inter-MCU transport or internal-hub design
+          expected_mouse=Device B pointer slowly sweeps left/right automatically on HOME while Device A remains Pro2
+          EOF
+          sha256sum build/m28-kit/*.uf2 >> build/m28-kit/F27-M28-DistinctUSB-Pro2-JoyConR.manifest.txt
+          cat > build/m28-kit/F27-M28-HARDWARE-PROCEDURE.txt <<'EOF'
+          F27-M28 DISTINCT-USB PRO2 + JOY-CON-R NATIVE MOUSE TOPOLOGY PROOF
+
+          Required:
+          - two separate Makerdiary/GeeekPi nRF52840 MDK USB dongles
+          - one ordinary USB hub connected to the Switch 2
+          - one Steam Controller for Device A
+
+          Flash:
+          - Device A: OpenPuck-F27-M28-A-Pro2-MDK.uf2
+          - Device B: OpenPuck-F27-M28-B-JoyConR-SyntheticMouse-MDK.uf2
+
+          Device A is the plain current reconciled Switch2Pro runtime. Select/use Switch 2 Pro mode as normally required by OpenPuck and connect the Steam Controller to Device A.
+          Device B is the hardware-proven M20/M3 Joy-Con 2 R personality with only its mouse source replaced by an automatic synthetic horizontal sweep; it does not need a Steam Controller.
+
+          Procedure:
+          1. Verify Device A alone appears as Switch 2 Pro and ordinary controls work.
+          2. Verify Device B alone appears/initializes as Joy-Con 2 R and the HOME pointer slowly sweeps left/right automatically.
+          3. Disconnect both from the console, connect both to separate downstream ports of the same external USB hub, then connect the hub to Switch 2.
+          4. Open Change Grip/Order if useful, then return HOME.
+          5. Record exact visible controller identities/count.
+          6. Confirm Device A ordinary buttons/sticks remain usable.
+          7. Confirm Device B automatic native Joy-Con mouse sweep remains visible on HOME while Device A is usable.
+          8. Record any pairing loops, reconnects, disappearing controller, or instability.
+
+          PASS:
+          - Pro2 remains registered/usable AND independent Joy-Con-R native mouse motion works simultaneously.
+          This validates the distinct-device-address architecture and justifies building the inter-MCU link/internal hub.
+
+          FAIL:
+          - First report each device's solo behavior. If both solo tests pass but combined-hub fails, the failure is simultaneous Pro2+Joy-Con/hub topology, not report encoding. Do not change mouse payload semantics before adjudicating that boundary.
+          EOF
+
+      - name: Upload F27-M28 two-device topology kit
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M28-DistinctUSB-Pro2-JoyConR
+          retention-days: 30
+          if-no-files-found: error
+          path: build/m28-kit/
