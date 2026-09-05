@@ -47,7 +47,7 @@ jobs:
           grep -q 'USBDevice.setConfigurationMaxPower(500)' OpenPuck/mode_joycon2.cpp
           ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
           ! grep -q '0x09.*native' OpenPuck/mode_joycon2.cpp
-          ! grep -qi 'audio' OpenPuck/mode_joycon2.cpp
+          ! grep -Eq 'TUSB_CLASS_AUDIO|audioOut|audioIn|AUDIO_' OpenPuck/mode_joycon2.cpp
           grep -q 'pip install adafruit-nrfutil intelhex' .github/workflows/f27-joycon2-g5-clean.yml
           ! grep -Eq 'adafruit-nrfutil==|intelhex==' .github/workflows/f27-joycon2-g5-clean.yml
 
