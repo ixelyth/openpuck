@@ -1,8 +1,8 @@
-name: Switch2Pro four-select no-audio MDK diagnostic
+name: Switch2Pro FourSelect under HORI 0F0D:0202 MDK diagnostic
 
 on:
   push:
-    branches: [diag-switch2pro-fourselect-noaudio-mdk]
+    branches: [diag-switch2pro-fourselect-hori0202-mdk]
   workflow_dispatch:
 
 permissions:
@@ -16,16 +16,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify PR269 base and branch scope
+      - name: Verify accepted FourSelect base and branch scope
         run: |
           set -eu
-          BASE=cafaba6eae52b997c685eecbaea97eb7dadfb050
+          BASE=704492ae94f3b7245e206d99cdb5551db5fb8549
           test "$(git merge-base HEAD "$BASE")" = "$BASE"
           git diff --name-only "$BASE"..HEAD | sort > /tmp/branch-files
           cat /tmp/branch-files
           test "$(wc -l < /tmp/branch-files)" -eq 2
           grep -qx '.github/workflows/diag-switch2pro-fourselect-noaudio-mdk.yml' /tmp/branch-files
-          grep -qx 'tools/diag_switch2pro_fourselect_noaudio.py' /tmp/branch-files
+          grep -qx 'tools/diag_switch2pro_fourselect_hori0202.py' /tmp/branch-files
 
       - uses: arduino/setup-arduino-cli@v2
       - uses: actions/setup-python@v7
@@ -51,7 +51,7 @@ jobs:
           test -z "$(git diff --name-only --diff-filter=U)"
           git diff --cached --check
 
-      - name: Apply FourSelect no-audio transform
+      - name: Apply accepted FourSelect no-audio transform
         run: |
           set -eu
           python3 tools/diag_switch2pro_fourselect_noaudio.py
@@ -60,12 +60,34 @@ jobs:
           grep -q 'vendorOut != 0x05 || vendorIn != 0x85' OpenPuck/mode_switch2_pro.cpp
           grep -q 'itf->bInterfaceNumber < 4' OpenPuck/mode_switch2_pro.cpp
           ! grep -q 'TUSB_CLASS_AUDIO' OpenPuck/mode_switch2_pro.cpp
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/pre-id.cpp
+
+      - name: Change only VID/PID to 0F0D:0202
+        run: |
+          set -eu
+          python3 tools/diag_switch2pro_fourselect_hori0202.py
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          before=Path('/tmp/pre-id.cpp').read_text()
+          after=Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          old='\tUSBDevice.setID(0x057e, 0x2069);\n'
+          new='\tUSBDevice.setID(0x0f0d, 0x0202);\n'
+          if before.count(old)!=1:
+              raise SystemExit('unexpected pre-identity source')
+          if after != before.replace(old,new,1):
+              raise SystemExit('identity transform changed more than VID/PID')
+          for x in ('USBDevice.setManufacturerDescriptor("Nintendo")',
+                    'USBDevice.setProductDescriptor("Switch 2 Pro Controller")',
+                    'USBDevice.setSerialDescriptor("00")'):
+              if x not in after: raise SystemExit('lost preserved identity field: '+x)
+          print('PASS: only post-FourSelect source delta is VID/PID')
+          PY
           mkdir -p build/diag
-          git diff -- OpenPuck/mode_switch2_pro.cpp > build/diag/Switch2Pro-FourSelect-NoAudio.patch
-          test -s build/diag/Switch2Pro-FourSelect-NoAudio.patch
+          git diff -- OpenPuck/mode_switch2_pro.cpp > build/diag/Switch2Pro-FourSelect-HORI0202.patch
 
       - name: Generate diagnostic version
-        run: OPK_BUILD_VERSION='SW2P4SELECT-NOAUDIO-cafaba6' ./gen_version.sh
+        run: OPK_BUILD_VERSION='SW2P4SEL-HORI0202-704492a' ./gen_version.sh
 
       - name: Build standard target
         run: |
@@ -76,55 +98,57 @@ jobs:
         run: make build-mdk
 
       - name: Generate MDK UF2
-        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK.uf2
+        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Switch2Pro-FourSelect-HORI0202-MDK.uf2
 
       - name: Validate UF2
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import struct, hashlib
-          p=Path('build/mdk/OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK.uf2')
+          p=Path('build/mdk/OpenPuck-Switch2Pro-FourSelect-HORI0202-MDK.uf2')
           d=p.read_bytes()
           if len(d)%512: raise SystemExit('bad UF2 length')
-          family=None; total=None; seen=[]; image=bytearray(); addrs=[]
+          family=total=None; seen=[]; image=bytearray(); addrs=[]
           for off in range(0,len(d),512):
               b=d[off:off+512]
               m0,m1,flags,addr,size,no,nblocks,fam=struct.unpack_from('<IIIIIIII',b,0)
               if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
-              family=fam if family is None else family
-              total=nblocks if total is None else total
+              family=fam if family is None else family; total=nblocks if total is None else total
               if fam!=family or nblocks!=total: raise SystemExit('inconsistent UF2')
               seen.append(no); addrs.append(addr)
               if addr>=0x26000: image += b[32:32+size]
-          if family!=0xADA52840: raise SystemExit('wrong family')
-          if seen!=list(range(total)): raise SystemExit('block order')
-          if b'SW2P4SELECT-NOAUDIO-cafaba6' not in image: raise SystemExit('missing marker')
+          if family!=0xADA52840 or seen!=list(range(total)): raise SystemExit('UF2 contract failure')
+          if b'SW2P4SEL-HORI0202-704492a' not in image: raise SystemExit('missing marker')
+          if b'Switch 2 Pro Controller' not in image: raise SystemExit('missing preserved product string')
           print('PASS',len(d),total,hex(min(addrs)),hex(max(addrs)+256),hashlib.sha256(d).hexdigest())
           PY
 
       - name: Write manifest
         run: |
-          cat > build/mdk/Switch2Pro-FourSelect-NoAudio.manifest.txt <<'EOF'
-          purpose=Switch2Pro four-controller same-address FourSelect topology discriminator
-          base=PR269 switch2pro head cafaba6eae52b997c685eecbaea97eb7dadfb050
-          device_identity=057E:2069 Nintendo Switch 2 Pro Controller
-          audio=OMITTED intentionally
-          hid_paths=4 full Pro2 HID IN/OUT interfaces
-          vendor_sessions=1 shared Nintendo vendor IN/OUT interface
+          cat > build/mdk/Switch2Pro-FourSelect-HORI0202.manifest.txt <<'EOF'
+          purpose=VID/PID classification discriminator for four Switch2Pro HID paths
+          accepted_fourselect_base=704492ae94f3b7245e206d99cdb5551db5fb8549
+          pr269_runtime_base=cafaba6eae52b997c685eecbaea97eb7dadfb050
+          usb_vid_pid=0F0D:0202
+          manufacturer=Nintendo (preserved)
+          product=Switch 2 Pro Controller (preserved)
+          serial=00 (preserved)
+          hid_report_contract=Switch2Pro 97-byte descriptor and 0x05/0x09 byte mapping preserved
+          vendor_pairing_contract=preserved
+          audio=omitted as in accepted FourSelect
+          hid_paths=4 full Pro2 HID IN/OUT
           selectors=L4->HID1,R4->HID2,L5->HID3,R5->HID4
-          neutral_policy=no selector or multiple selectors => all four neutral
-          rf_sources=1 real live Steam Controller
-          reviewer_branch_modified=no
+          only_post_fourselect_source_change=057E:2069 to 0F0D:0202
           EOF
-          sha256sum build/mdk/OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK.uf2 >> build/mdk/Switch2Pro-FourSelect-NoAudio.manifest.txt
+          sha256sum build/mdk/OpenPuck-Switch2Pro-FourSelect-HORI0202-MDK.uf2 >> build/mdk/Switch2Pro-FourSelect-HORI0202.manifest.txt
 
       - uses: actions/upload-artifact@v7
         with:
-          name: OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK
+          name: OpenPuck-Switch2Pro-FourSelect-HORI0202-MDK
           retention-days: 30
           if-no-files-found: error
           path: |
-            build/mdk/OpenPuck-Switch2Pro-FourSelect-NoAudio-MDK.uf2
+            build/mdk/OpenPuck-Switch2Pro-FourSelect-HORI0202-MDK.uf2
             build/mdk/OpenPuck.ino.hex
-            build/mdk/Switch2Pro-FourSelect-NoAudio.manifest.txt
-            build/diag/Switch2Pro-FourSelect-NoAudio.patch
+            build/mdk/Switch2Pro-FourSelect-HORI0202.manifest.txt
+            build/diag/Switch2Pro-FourSelect-HORI0202.patch
