@@ -1,0 +1,66 @@
+name: Temporary RF journal link-guard staging patch
+
+on:
+  push:
+    branches:
+      - rf-recovery-journal-persist-stage
+    paths:
+      - '.github/workflows/rf-journal-guard-stage.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: rf-recovery-journal-persist-stage
+          fetch-depth: 0
+      - name: Add link-time RF journal guard
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {count}: {old[:100]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once('OpenPuck/rf_journal_layout.h',
+                       '#define RF_CHANNEL_JOURNAL_PAGE_COUNT 2u\n#define RF_CHANNEL_JOURNAL_BASE 0x86000UL\n',
+                       '#define RF_CHANNEL_JOURNAL_PAGE_COUNT 2u\n#ifndef OPK_RF_JOURNAL_BASE\n#define OPK_RF_JOURNAL_BASE 0x86000UL\n#endif\n#define RF_CHANNEL_JOURNAL_BASE OPK_RF_JOURNAL_BASE\n')
+
+          replace_once('OpenPuck/rf_link.cpp',
+                       '''static uintptr_t rfChannelJournalFlashUsedEnd()\n{\n\treturn (uintptr_t)__etext +\n\t       ((uintptr_t)__data_end__ - (uintptr_t)__data_start__);\n}\n''',
+                       '''static uintptr_t rfChannelJournalFlashUsedEnd()\n{\n\treturn (uintptr_t)__etext +\n\t       ((uintptr_t)__data_end__ - (uintptr_t)__data_start__);\n}\n\n// This NOBITS section reserves the fixed journal window in the linker address\n// map without emitting bytes into HEX/UF2. The Makefile pins this section to\n// RF_CHANNEL_JOURNAL_BASE; if linked application data grows into the window,\n// GNU ld rejects the overlap before a firmware artifact can be produced.\n__asm__(".section .rf_journal_guard,\\\"a\\\",%nobits\\n"\n\t".space 8192\\n"\n\t".previous\\n");\n''')
+
+          replace_once('Makefile',
+                       'OPENPUCK_LINK_FLAGS ?= -Wl,--wrap=tud_vendor_control_xfer_cb\n',
+                       'RF_JOURNAL_BASE ?= 0x86000\nOPENPUCK_LINK_FLAGS ?= -Wl,--wrap=tud_vendor_control_xfer_cb -Wl,--section-start=.rf_journal_guard=$(RF_JOURNAL_BASE)\n')
+          replace_once('Makefile',
+                       'USB_EXTRA_FLAGS = -DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=$(CFG_TUD_HID) -DCFG_TUD_TASK_QUEUE_SZ=$(CFG_TUD_TASK_QUEUE_SZ) -DCFG_TUD_VENDOR_TX_BUFSIZE=$(CFG_TUD_VENDOR_TX_BUFSIZE) $(EXTRA_FLAGS)\n',
+                       'USB_EXTRA_FLAGS = -DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=$(CFG_TUD_HID) -DCFG_TUD_TASK_QUEUE_SZ=$(CFG_TUD_TASK_QUEUE_SZ) -DCFG_TUD_VENDOR_TX_BUFSIZE=$(CFG_TUD_VENDOR_TX_BUFSIZE) -DOPK_RF_JOURNAL_BASE=$(RF_JOURNAL_BASE) $(EXTRA_FLAGS)\n')
+
+          replace_once('ARCHITECTURE.md',
+                       '''- `bonds.bin` (`bonds.cpp`) — the four bond records.\n\nMode switches (chord, WebUSB, or CDC) call `saveMode()` then reboot so the next boot enumerates the right\n''',
+                       '''- `bonds.bin` (`bonds.cpp`) — the four bond records.\n- The RF channel-history journal uses two CRC/commit-protected flash pages at `0x86000–0x87FFF`. Official\n  application builds are link-guarded below that window and WebUSB update staging starts above it, so ordinary\n  firmware updates preserve learned RF history. A full-board wipe intentionally clears the journal too.\n\nMode switches (chord, WebUSB, or CDC) call `saveMode()` then reboot so the next boot enumerates the right\n''')
+          PY
+      - name: Validate guard patch
+        run: |
+          git diff --check
+          grep -q 'OPK_RF_JOURNAL_BASE' OpenPuck/rf_journal_layout.h
+          grep -q '.rf_journal_guard' OpenPuck/rf_link.cpp
+          grep -q -- '--section-start=.rf_journal_guard=$(RF_JOURNAL_BASE)' Makefile
+          grep -q '0x86000–0x87FFF' ARCHITECTURE.md
+      - name: Commit guard patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add OpenPuck/rf_journal_layout.h OpenPuck/rf_link.cpp Makefile ARCHITECTURE.md
+          git commit -m 'RF recovery: guard persistent journal flash window'
+          git push origin HEAD:rf-recovery-journal-persist-stage
