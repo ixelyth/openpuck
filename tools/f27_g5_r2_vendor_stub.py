@@ -24,7 +24,7 @@ if end < 0:
 old = s[start:end]
 if old.count("usbd_edpt_open") != 1 or old.count("usbd_edpt_xfer") != 1:
     raise SystemExit("G5-R2 expected exactly one vendor open and one initial OUT arm")
-new = r'''\tif (itf->bInterfaceNumber == 1 && itf->bInterfaceClass == 0xff) {
+new = '''\tif (itf->bInterfaceNumber == 1 && itf->bInterfaceClass == 0xff) {
 \t\t// G5-R2 enumeration discriminator: claim the captured Nintendo vendor
 \t\t// interface descriptor, but deliberately leave its bulk endpoints closed.
 \t\t// This isolates endpoint open/arm/xfer runtime from the descriptor shell.
