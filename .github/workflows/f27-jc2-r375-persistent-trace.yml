@@ -90,17 +90,19 @@ jobs:
           import re
           before=Path('/tmp/r374-mode_joycon2.cpp').read_text()
           after=Path('OpenPuck/mode_joycon2.cpp').read_text()
+          def compact(s):
+              return re.sub(r'\s+', '', s)
           def block(src,name):
               m=re.search(r'static const uint8_t '+re.escape(name)+r'\[\] = \{.*?\n\};',src,re.S)
               if not m: raise SystemExit('missing '+name)
-              return m.group(0)
+              return compact(m.group(0))
           for name in ('JOYCON2_HID_DESC','JOYCON2_CFG_BODY','JOYCON2_FACTORY_ID','CHARGING_GRIP_FACTORY'):
               if block(before,name) != block(after,name):
                   raise SystemExit('R375 changed USB/protocol constant '+name)
           if Path('/tmp/r374-Makefile').read_text() != Path('Makefile').read_text():
               raise SystemExit('R375 unexpectedly changed Makefile/link wrappers')
-          # Generic OpenPuck USB presentation is not touched by the trace transform.
-          if Path('/tmp/r374-OpenPuck.ino').read_text() != Path('OpenPuck/OpenPuck.ino').read_text():
+          # Trace transform never patches OpenPuck.ino; ignore clang-format whitespace.
+          if compact(Path('/tmp/r374-OpenPuck.ino').read_text()) != compact(Path('OpenPuck/OpenPuck.ino').read_text()):
               raise SystemExit('R375 unexpectedly changed OpenPuck.ino USB presentation')
           print('R375 trace-only scope + descriptor invariants PASS')
           PY
