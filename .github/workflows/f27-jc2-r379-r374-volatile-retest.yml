@@ -1,0 +1,185 @@
+name: F27 JC2 R379 r374 volatile retest
+
+on:
+  push:
+    branches:
+      - f27-jc2-r379-r374-volatile-retest
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Compose exact r374 runtime
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          python3 tools/f27_g5_integrate.py
+          python3 tools/f27_g5_re_refresh.py
+          python3 tools/f27_jc2_init_fidelity.py
+          python3 tools/f27_jc2_ab_common_fix.py
+          python3 tools/f27_jc2_ab_make_nonclean.py
+          cp OpenPuck/OpenPuck.ino /tmp/r374-OpenPuck.ino
+          cp OpenPuck/mode_joycon2.cpp /tmp/r374-mode_joycon2.cpp
+          cp OpenPuck/mode_joycon2.h /tmp/r374-mode_joycon2.h
+          cp OpenPuck/config.cpp /tmp/r374-config.cpp
+          cp OpenPuck/bonds.cpp /tmp/r374-bonds.cpp
+          cp Makefile /tmp/r374-Makefile
+
+      - name: Replace filesystem-backed startup with RAM-only override
+        run: |
+          set -eu
+          python3 tools/f27_jc2_r379_volatile_start.py
+          make format
+          make check
+          git diff --check
+
+      - name: Prove exact r374 protocol and persistence isolation
+        run: |
+          set -eu
+          grep -q '#define MODE_JOYCON2 13' OpenPuck/config.h
+          grep -q 'JOYCON2(jcr/jcl)' OpenPuck/OpenPuck.ino
+          grep -q 'OPK_JC2_VOLATILE_START' OpenPuck/OpenPuck.ino
+          ! grep -q 'OPK_JC2_START_ONCE' OpenPuck/OpenPuck.ino
+          ! grep -q 'OPK_JC2_START_VARIANT' OpenPuck/OpenPuck.ino
+          ! grep -q '/jc2mode' OpenPuck/OpenPuck.ino
+          ! grep -q '/jc2trace' OpenPuck/OpenPuck.ino
+          ! grep -q 'OPK_G5_FORCE_JOYCON2' OpenPuck/OpenPuck.ino
+          grep -q 'F27-JC2-R374-INIT-PAIRING-FIDELITY' OpenPuck/mode_joycon2.cpp
+          grep -q 'JC2_PAIR_PUBLIC' OpenPuck/mode_joycon2.cpp
+          grep -q 'handlePairing' OpenPuck/mode_joycon2.cpp
+          grep -q 'case 0x15:' OpenPuck/mode_joycon2.cpp
+          grep -q 'jc2PairResponse' OpenPuck/mode_joycon2.cpp
+          grep -q 'replyLen = 9;' OpenPuck/mode_joycon2.cpp
+          grep -q 'replyLen = 32;' OpenPuck/mode_joycon2.cpp
+          grep -q 'replyLen = 37;' OpenPuck/mode_joycon2.cpp
+          grep -q 'out\[2\] = 0x03' OpenPuck/mode_joycon2.cpp
+          grep -q 'out\[3\] = 0x03' OpenPuck/mode_joycon2.cpp
+          grep -q 'out\[4\] = 0x03' OpenPuck/mode_joycon2.cpp
+          grep -q 'ackHeader(reply, 0x08, cmd\[2\], sub)' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'JOYCON2_VENDOR_PROTOCOL' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'Adafruit_LittleFS' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'NRF_NVMC' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'jc2trace' OpenPuck/mode_joycon2.cpp
+          cmp -s /tmp/r374-mode_joycon2.cpp OpenPuck/mode_joycon2.cpp
+          cmp -s /tmp/r374-mode_joycon2.h OpenPuck/mode_joycon2.h
+          cmp -s /tmp/r374-config.cpp OpenPuck/config.cpp
+          cmp -s /tmp/r374-bonds.cpp OpenPuck/bonds.cpp
+          cmp -s /tmp/r374-Makefile Makefile
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('OpenPuck/OpenPuck.ino').read_text()
+          m=re.search(r'#if defined\(OPK_JC2_VOLATILE_START\).*?#endif', s, re.S)
+          if not m: raise SystemExit('missing volatile startup block')
+          block=m.group(0)
+          required=('g_usbMode = MODE_JOYCON2;','applyActiveType();')
+          for x in required:
+              if x not in block: raise SystemExit('missing '+x)
+          forbidden=('InternalFS','File ','saveCfg','saveMode','remove(','NRF_NVMC','factoryErase')
+          for x in forbidden:
+              if x in block: raise SystemExit('volatile block mutates persistent storage: '+x)
+          print('R379 r374 protocol exact; experimental startup persistence-free PASS')
+          PY
+
+      - name: Build Makerdiary r379 r374 volatile retest
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-R379-R374V-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_JC2_VOLATILE_START=1 -DOPK_G5_JOYCON_SIDE=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-R379-R374-Volatile-JCR-MDK.uf2
+
+      - name: Validate UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-R379-R374-Volatile-JCR-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; addrs=[]
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no); addrs.append(addr)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'Joy-Con 2 (R)','JCR product'),
+              (b'F27-R379-R374V-'+short,'build marker'),
+              (b'JOYCON2(jcr/jcl)','mode-table fix'),
+              (b'HDL50003485519','Charging Grip serial'),
+              (bytes.fromhex('5cf6ee792cdf05e1ba2b6325c41a5f10'),'pairing B1'),
+          ]:
+              if needle not in image: raise SystemExit('missing '+label)
+          for bad,label in [
+              (b'/jc2mode','filesystem mode tag'),
+              (b'/jc2trace','trace filesystem path'),
+              (b'Switch 2 Pro Controller','Pro2 contamination'),
+          ]:
+              if bad in image: raise SystemExit('forbidden '+label)
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data),'range',hex(min(addrs))+'..'+hex(max(addrs)+256))
+          PY
+
+      - name: Record manifest
+        run: |
+          cat > build/mdk/F27-R379-R374-Volatile-JCR.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          upstream_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          protocol_runtime=exact r374 composition: G5 integrate + RE refresh + init fidelity + common MODE_NAME fix + non-clean topology
+          experimental_delta=replace /jc2mode filesystem-backed one-shot with RAM-only OPK_JC2_VOLATILE_START
+          experimental_persistence=NONE
+          trace=NONE
+          raw_flash_trace=NONE
+          controller_bond_baseline=post-full-board-wipe current-main+MDK control preserves bond across identical UF2 reflash
+          test_order=confirm bond on control; flash r379; test; immediately flash control again and verify bond survives
+          adjudication=if bond survives, r374 protocol is exonerated from persistent corruption and boundary moves to r375; if bond is lost, r374-era runtime remains implicated
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-R379-R374-Volatile-JCR-MDK.uf2 >> build/mdk/F27-R379-R374-Volatile-JCR.manifest.txt
+
+      - name: Upload r379 retest
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-R379-R374-Volatile-JCR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-R379-R374-Volatile-JCR-MDK.uf2
+            build/mdk/F27-R379-R374-Volatile-JCR.manifest.txt
