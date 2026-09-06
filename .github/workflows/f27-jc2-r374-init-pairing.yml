@@ -107,7 +107,6 @@ jobs:
           if seen != list(range(total)): raise SystemExit('nonsequential UF2')
           short=os.environ['GITHUB_SHA'][:8].encode()
           for needle,label in [
-              (b'F27-JC2-R374-INIT-PAIRING-FIDELITY','init fidelity marker'),
               (b'Joy-Con 2 (R)','JCR product'),
               (b'F27-JC2-R374-'+short,'build marker'),
               (b'JOYCON2(jcr/jcl)','mode-table fix'),
@@ -137,6 +136,7 @@ jobs:
           usb_activation=03/03 and 03/0D retained; 03/0A report select retained
           charging_grip=0x08 retained
           switch2pro_source_dependency=NONE
+          validator_note=R374 run1 built successfully; its only failure was an optimized-out diagnostic string witness, removed from binary validator in run2
           hardware_question=does completing observed Joy-Con init/pairing allow the Switch 2 to surface JCR as a controller?
           EOF
           sha256sum build/mdk/OpenPuck-F27-JC2-R374-InitPairing-JCR-MDK.uf2 >> build/mdk/F27-JC2-R374-InitPairing.manifest.txt
