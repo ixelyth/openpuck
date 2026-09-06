@@ -88,7 +88,7 @@ src = regex_once(
 # per-session hidInstance; preserve whichever expression the accepted baseline uses.
 src = regex_once(
     src,
-    r'if\s*\(\s*!g_sw2InputEnabled\s*\|\|\s*!tud_hid_n_ready\(([^)]]+)\)\s*\)\s*\n\s*continue;',
+    r'if\s*\(\s*!g_sw2InputEnabled\s*\|\|\s*!tud_hid_n_ready\(([^)]+)\)\s*\)\s*\n\s*continue;',
     '''if (!g_sw2InputEnabled)\n\t\t\tcontinue;\n\t\tbool hidReady = tud_hid_n_ready(\1);\n\t\tif (s == M15_SW2_JOYCON_R)\n\t\t\tm30TraceSession1Event(hidReady ? 2 : 1, hidReady, g_sw2ActiveReport);\n\t\tif (!hidReady)\n\t\t\tcontinue;''',
     "session1 readiness observation",
 )
