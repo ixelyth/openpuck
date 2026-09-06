@@ -1,0 +1,178 @@
+name: F27 JC2 R375 persistent handshake trace
+
+on:
+  push:
+    branches:
+      - f27-jc2-r375-persistent-trace
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Compose hardware-failed r374 non-clean JCR authority
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          python3 tools/f27_g5_integrate.py
+          python3 tools/f27_g5_re_refresh.py
+          python3 tools/f27_jc2_init_fidelity.py
+          python3 tools/f27_jc2_ab_common_fix.py
+          python3 tools/f27_jc2_ab_make_nonclean.py
+          cp OpenPuck/mode_joycon2.cpp /tmp/r374-mode_joycon2.cpp
+          cp OpenPuck/OpenPuck.ino /tmp/r374-OpenPuck.ino
+          cp Makefile /tmp/r374-Makefile
+
+      - name: Apply R375 observation-only persistent trace
+        run: |
+          set -eu
+          python3 tools/f27_jc2_persistent_trace.py
+          make format
+          make check
+          git diff --check
+
+      - name: Prove R375 trace scope and USB invariants
+        run: |
+          set -eu
+          grep -q '#define MODE_JOYCON2 13' OpenPuck/config.h
+          grep -q 'JOYCON2(jcr/jcl)' OpenPuck/OpenPuck.ino
+          grep -q 'OPK_JC2_START_ONCE' OpenPuck/OpenPuck.ino
+          ! grep -q 'OPK_G5_FORCE_JOYCON2' OpenPuck/OpenPuck.ino
+          ! grep -q 'joyCon2Clean' OpenPuck/OpenPuck.ino
+          grep -q 'if (!puckMode && !keepCdc && !psClean)' OpenPuck/OpenPuck.ino
+          grep -q 'if (!puckMode && !psClean)' OpenPuck/OpenPuck.ino
+          ! grep -q -- '--wrap=tud_descriptor_configuration_cb' Makefile
+          ! grep -q '__wrap_tud_descriptor_configuration_cb' OpenPuck/mode_joycon2.cpp
+          grep -q 'F27-JC2-R374-INIT-PAIRING-FIDELITY' OpenPuck/mode_joycon2.cpp
+          grep -q 'JC2_PAIR_PUBLIC' OpenPuck/mode_joycon2.cpp
+          grep -q 'handlePairing' OpenPuck/mode_joycon2.cpp
+          grep -q 'ackHeader(reply, 0x08, cmd\[2\], sub)' OpenPuck/mode_joycon2.cpp
+          grep -q '0x01, 0x00, 0x0e, JC2_CONTROLLER_TYPE' OpenPuck/mode_joycon2.cpp
+          grep -q 'static_assert(sizeof JOYCON2_HID_DESC == 100' OpenPuck/mode_joycon2.cpp
+          grep -q 'static_assert(sizeof JOYCON2_CFG_BODY == 71' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'JOYCON2_VENDOR_PROTOCOL' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'primaryCal' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
+          grep -q 'JC2_TRACE_FILE\[\] = "/jc2trace.bin"' OpenPuck/mode_joycon2.cpp
+          grep -q 'jc2TracePersistQuiet' OpenPuck/mode_joycon2.cpp
+          grep -q 'jc2TraceQueueControl' OpenPuck/mode_joycon2.cpp
+          grep -q 'jc2TraceAppendBulk' OpenPuck/mode_joycon2.cpp
+          grep -q 'joyCon2TraceDump' OpenPuck/serial_console.cpp
+          grep -q 'strcmp(line, "JT")' OpenPuck/serial_console.cpp
+          grep -q 'strcmp(line, "JC")' OpenPuck/serial_console.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          before=Path('/tmp/r374-mode_joycon2.cpp').read_text()
+          after=Path('OpenPuck/mode_joycon2.cpp').read_text()
+          def block(src,name):
+              m=re.search(r'static const uint8_t '+re.escape(name)+r'\[\] = \{.*?\n\};',src,re.S)
+              if not m: raise SystemExit('missing '+name)
+              return m.group(0)
+          for name in ('JOYCON2_HID_DESC','JOYCON2_CFG_BODY','JOYCON2_FACTORY_ID','CHARGING_GRIP_FACTORY'):
+              if block(before,name) != block(after,name):
+                  raise SystemExit('R375 changed USB/protocol constant '+name)
+          if Path('/tmp/r374-Makefile').read_text() != Path('Makefile').read_text():
+              raise SystemExit('R375 unexpectedly changed Makefile/link wrappers')
+          # Generic OpenPuck USB presentation is not touched by the trace transform.
+          if Path('/tmp/r374-OpenPuck.ino').read_text() != Path('OpenPuck/OpenPuck.ino').read_text():
+              raise SystemExit('R375 unexpectedly changed OpenPuck.ino USB presentation')
+          print('R375 trace-only scope + descriptor invariants PASS')
+          PY
+
+      - name: Build Makerdiary R375 trace JCR
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-JC2-R375-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_JC2_START_ONCE=1 -DOPK_JC2_START_VARIANT=5 -DOPK_G5_JOYCON_SIDE=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-JC2-R375-PersistentTrace-JCR-MDK.uf2
+
+      - name: Validate R375 UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-JC2-R375-PersistentTrace-JCR-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; addrs=[]
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no); addrs.append(addr)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'Joy-Con 2 (R)','JCR product'),
+              (b'F27-JC2-R375-'+short,'build marker'),
+              (b'JOYCON2(jcr/jcl)','mode-table fix'),
+              (b'/jc2trace.bin','persistent trace path'),
+              (b'# JT begin','trace dump command'),
+              (b'HDL50003485519','Charging Grip serial'),
+              (bytes.fromhex('5cf6ee792cdf05e1ba2b6325c41a5f10'),'pairing B1'),
+          ]:
+              if needle not in image: raise SystemExit('missing '+label)
+          if b'Switch 2 Pro Controller' in image: raise SystemExit('Pro2 contamination')
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data),'app_range',hex(min(addrs))+'..'+hex(max(addrs)+256))
+          PY
+
+      - name: Record R375 manifest
+        run: |
+          cat > build/mdk/F27-JC2-R375-PersistentTrace.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          parent_hardware_authority=R374 bc430080ab4bdfd30a2a2d72c604f2879116821e
+          upstream_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          hardware_authority=R374 stable enumeration PASS; JCR controller recognition FAIL
+          usb_policy=identical to R374 non-clean composite; JCR HID/vendor first; wake HID + WebUSB appended
+          protocol_policy=identical replies to R374; trace does not answer previously-declined device vendor-control requests
+          trace=RAM capture during active exchange; batched LittleFS persistence only after >=1000ms silence
+          trace_file=/jc2trace.bin
+          trace_records=S start, R USB reset, B vendor bulk, C device vendor-control SETUP, G HID GET_REPORT, O HID SET_REPORT
+          trace_dump=CDC command JT; clear command JC
+          startup_variant=5
+          switch2pro_source_dependency=NONE
+          hardware_question=how far does the Switch 2 progress through the JCR USB initialization before abandoning controller recognition?
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-JC2-R375-PersistentTrace-JCR-MDK.uf2 >> build/mdk/F27-JC2-R375-PersistentTrace.manifest.txt
+
+      - name: Upload R375 trace build
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-JC2-R375-PersistentTrace-JCR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-JC2-R375-PersistentTrace-JCR-MDK.uf2
+            build/mdk/F27-JC2-R375-PersistentTrace.manifest.txt
