@@ -1,0 +1,172 @@
+name: Switch2Pro FourSelect r394 raw JT comparator
+
+on:
+  push:
+    branches: [diag-switch2pro-fourselect-r394-rawtrace]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify frozen FourSelect authority and branch scope
+        run: |
+          set -eu
+          BASE=704492ae94f3b7245e206d99cdb5551db5fb8549
+          test "$(git merge-base HEAD "$BASE")" = "$BASE"
+          git diff --name-only "$BASE"..HEAD | sort > /tmp/branch-files
+          cat /tmp/branch-files
+          test "$(wc -l < /tmp/branch-files)" -eq 2
+          grep -qx '.github/workflows/diag-switch2pro-fourselect-r394-rawtrace.yml' /tmp/branch-files
+          grep -qx 'tools/diag_switch2pro_fourselect_r394_trace.py' /tmp/branch-files
+
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Apply current Makerdiary MDK build support only
+        run: |
+          set -eu
+          MDK=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git diff --cached --check
+
+      - name: Reconstruct exact accepted Switch2Pro FourSelect no-audio topology
+        run: |
+          set -eu
+          python3 tools/diag_switch2pro_fourselect_noaudio.py
+          git diff --check
+          grep -q 'sizeof SWITCH2_PRO_CFG_BODY == 191' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'vendorOut != 0x05 || vendorIn != 0x85' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'itf->bInterfaceNumber < 4' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'tud_hid_n_report(hid, rid' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'TUSB_CLASS_AUDIO' OpenPuck/mode_switch2_pro.cpp
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/fourselect-before-trace.cpp
+
+      - name: Apply r394 trace-only observer
+        run: |
+          set -eu
+          python3 tools/diag_switch2pro_fourselect_r394_trace.py
+          /usr/bin/clang-format-18 -i OpenPuck/mode_switch2_pro.cpp OpenPuck/mode_switch2_pro.h OpenPuck/serial_console.cpp
+          /usr/bin/clang-format-18 --dry-run --Werror OpenPuck/mode_switch2_pro.cpp OpenPuck/mode_switch2_pro.h OpenPuck/serial_console.cpp
+          git diff --check
+
+      - name: Prove r394 topology and raw-trace scope
+        run: |
+          set -eu
+          grep -q 'sizeof SWITCH2_PRO_CFG_BODY == 191' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'vendorOut != 0x05 || vendorIn != 0x85' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'itf->bInterfaceNumber < 4' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'SW2P4_TRACE_PAGE = 0x000EB000UL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'SW2P4_TRACE_MAGIC = 0x34505453UL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'source=Switch2Pro-FourSelect-r394-raw' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'switch2ProFourSelectTraceDump' OpenPuck/serial_console.cpp
+          grep -q 'switch2ProFourSelectTraceClear' OpenPuck/serial_console.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'TUSB_CLASS_AUDIO' OpenPuck/mode_switch2_pro.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          b=Path('/tmp/fourselect-before-trace.cpp').read_text()
+          a=Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          # Trace layer must leave the defining FourSelect descriptor/topology anchors intact.
+          anchors=[
+              'static_assert(sizeof SWITCH2_PRO_CFG_BODY == 191',
+              'vendorOut != 0x05 || vendorIn != 0x85',
+              'static const uint32_t selector[4] = { TB_L4, TB_R4, TB_L5, TB_R5 };',
+              'if (g_usbMode == MODE_SW2_PRO && itf < 4)',
+              'if (itf->bInterfaceNumber < 4 &&',
+          ]
+          for x in anchors:
+              if x not in b or x not in a:
+                  raise SystemExit('FourSelect anchor changed/missing: '+x)
+          print('r394 trace-scope anchors PASS')
+          PY
+
+      - name: Generate diagnostic version
+        run: |
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="SW2P4SELECT-R394-TRACE-${short}" ./gen_version.sh
+
+      - name: Build Makerdiary MDK target
+        run: make build-mdk
+
+      - name: Generate MDK UF2
+        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Switch2Pro-FourSelect-R394-RawTrace-MDK.uf2
+
+      - name: Validate UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct, hashlib
+          p=Path('build/mdk/OpenPuck-Switch2Pro-FourSelect-R394-RawTrace-MDK.uf2')
+          d=p.read_bytes()
+          if len(d)%512: raise SystemExit('bad UF2 length')
+          family=None; total=None; seen=[]; lo=0xffffffff; hi=0; image=bytearray()
+          for off in range(0,len(d),512):
+              b=d[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,fam=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
+              family=fam if family is None else family
+              total=nblocks if total is None else total
+              if fam!=family or nblocks!=total: raise SystemExit('inconsistent UF2')
+              seen.append(no); lo=min(lo,addr); hi=max(hi,addr+size)
+              if addr>=0x26000: image += b[32:32+size]
+          if family!=0xADA52840: raise SystemExit('wrong family')
+          if seen!=list(range(total)): raise SystemExit('block order')
+          if hi>0xEB000: raise SystemExit('image reaches raw trace page')
+          if b'SW2P4SELECT-R394-TRACE-' not in image: raise SystemExit('missing marker')
+          print('PASS',len(d),total,hex(lo),hex(hi),hashlib.sha256(d).hexdigest())
+          PY
+
+      - name: Write manifest
+        run: |
+          cat > build/mdk/Switch2Pro-FourSelect-R394-RawTrace.manifest.txt <<EOF
+          purpose=trace-only replay of hardware-tested Switch2Pro FourSelect no-audio discriminator
+          frozen_fourselect_authority=704492ae94f3b7245e206d99cdb5551db5fb8549
+          source_commit=${GITHUB_SHA}
+          makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          device_identity=057E:2069 Nintendo Switch 2 Pro Controller
+          audio=OMITTED exactly as original FourSelect discriminator
+          hid_paths=4 full Pro2 HID IN/OUT interfaces
+          vendor_sessions=1 shared Nintendo vendor IN/OUT interface
+          selectors=L4->HID0,R4->HID1,L5->HID2,R5->HID3
+          trace=raw 0xEB000 magic 0x34505453 phases 1-notready 2-ready 3-queued
+          trace_commands=JT dump; JC clear
+          filesystem_trace_writes=none
+          hardware_status=PENDING
+          EOF
+          sha256sum build/mdk/OpenPuck-Switch2Pro-FourSelect-R394-RawTrace-MDK.uf2 >> build/mdk/Switch2Pro-FourSelect-R394-RawTrace.manifest.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-Switch2Pro-FourSelect-R394-RawTrace
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-Switch2Pro-FourSelect-R394-RawTrace-MDK.uf2
+            build/mdk/Switch2Pro-FourSelect-R394-RawTrace.manifest.txt
