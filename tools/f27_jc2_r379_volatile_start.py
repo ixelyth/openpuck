@@ -22,7 +22,7 @@ end += len("#endif\n")
 replacement = (
     "#if defined(OPK_JC2_VOLATILE_START) && OPK_JC2_VOLATILE_START\n"
     "\t// R379 adjudication: enter JCR mode for this boot in RAM only.\n"
-    "\t// Do not create/remove/write any InternalFS tag or persist this override.\n"
+    "\t// Do not create/remove/write any persistent startup tag or save this override.\n"
     "\tg_usbMode = MODE_JOYCON2;\n"
     "\tapplyActiveType();\n"
     "#endif\n"
