@@ -1,0 +1,203 @@
+name: F27 JC2 R382 Pro2 factory identity probe
+
+on:
+  push:
+    branches:
+      - f27-jc2-r382-pro2-factory-identity-probe
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Compose exact accepted r380 runtime
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c 0d61497a5fcebc697a502946b1b76419e9a0c61c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          python3 tools/f27_g5_integrate.py
+          python3 tools/f27_g5_re_refresh.py
+          python3 tools/f27_jc2_init_fidelity.py
+          python3 tools/f27_jc2_ab_common_fix.py
+          python3 tools/f27_jc2_ab_make_nonclean.py
+          python3 tools/f27_jc2_r379_volatile_start.py
+          make format
+          make check
+          git diff --check
+          git show 0d61497a5fcebc697a502946b1b76419e9a0c61c:tools/f27_jc2_persistent_trace.py > /tmp/f27_jc2_persistent_trace.py
+          python3 /tmp/f27_jc2_persistent_trace.py
+          sed -i 's/persistent tag or save this override/persistent startup tag or save this override/' tools/f27_jc2_r380_raw_trace.py
+          python3 tools/f27_jc2_r380_raw_trace.py
+          if ! grep -q '#include "mode_joycon2.h"' OpenPuck/OpenPuck.ino; then
+            sed -i '/#include "controllers.h"/a #include "mode_joycon2.h"' OpenPuck/OpenPuck.ino
+          fi
+          make format
+          make check
+          git diff --check
+          cp OpenPuck/mode_joycon2.cpp /tmp/r380-mode_joycon2.cpp
+          find OpenPuck -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/r380-openpuck.sha256
+
+      - name: Apply only Pro2 factory identity to C0/03
+        run: |
+          set -eu
+          python3 tools/f27_jc2_r382_pro2_factory_identity.py
+          make format
+          make check
+          git diff --check
+
+      - name: Prove single-variable r382 scope and persistence isolation
+        run: |
+          set -eu
+          grep -q '#define JC2_PID 0x2066' OpenPuck/mode_joycon2.cpp
+          grep -q '#define JC2_NATIVE_REPORT 0x08' OpenPuck/mode_joycon2.cpp
+          grep -q 'Joy-Con 2 (R)' OpenPuck/mode_joycon2.cpp
+          grep -q 'JC2_TRACE_RAW_PAGE = 0x000EB000UL' OpenPuck/mode_joycon2.cpp
+          grep -q 'source=JCR-direct-r380-raw' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'Adafruit_LittleFS' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'InternalFileSystem' OpenPuck/mode_joycon2.cpp
+          ! grep -q '/jc2mode' OpenPuck/OpenPuck.ino
+          ! grep -q '/jc2trace' OpenPuck/OpenPuck.ino
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, re
+
+          before = Path('/tmp/r380-mode_joycon2.cpp').read_text()
+          after = Path('OpenPuck/mode_joycon2.cpp').read_text()
+          pat = re.compile(r'static const uint8_t JOYCON2_FACTORY_ID\[64\] = \{.*?\n\};', re.S)
+          mb = pat.search(before); ma = pat.search(after)
+          if not mb or not ma:
+              raise SystemExit('missing factory identity array')
+          if mb.group(0) == ma.group(0):
+              raise SystemExit('factory identity did not change')
+          restored = after[:ma.start()] + mb.group(0) + after[ma.end():]
+          if restored != before:
+              raise SystemExit('R382 changed mode_joycon2.cpp outside JOYCON2_FACTORY_ID')
+
+          # Parse the post-transform array and require the exact M27 64-byte identity.
+          body = ma.group(0).split('{',1)[1].rsplit('}',1)[0]
+          vals=[]
+          for tok in re.findall(r"0x[0-9a-fA-F]+|'(?:\\.|[^'])'|\b\d+\b", body):
+              if tok.startswith('0x'):
+                  vals.append(int(tok,16))
+              elif tok.startswith("'"):
+                  vals.append(ord(bytes(tok[1:-1], 'utf-8').decode('unicode_escape')))
+              else:
+                  vals.append(int(tok))
+          expected = [
+              0x01,0x00,0x48,0x45,0x57,0x37,0x30,0x30,0x30,0x36,0x31,0x36,0x39,0x37,0x38,0x30,
+              0x00,0x00,0x7e,0x05,0x69,0x20,0x01,0x06,0x01,0x23,0x23,0x23,0xa0,0xa0,0xa0,0xe6,
+              0xe6,0xe6,0x32,0x32,0x32,
+          ] + [0xff]*27
+          if vals != expected:
+              raise SystemExit(f'R382 identity mismatch: got {len(vals)} bytes')
+
+          # Every other OpenPuck file must be byte-identical to the accepted r380 composition.
+          prior={}
+          for line in Path('/tmp/r380-openpuck.sha256').read_text().splitlines():
+              h,p=line.split(None,1); prior[p.strip()]=h
+          for p,h in prior.items():
+              if p == 'OpenPuck/mode_joycon2.cpp':
+                  continue
+              got=hashlib.sha256(Path(p).read_bytes()).hexdigest()
+              if got != h:
+                  raise SystemExit('R382 changed unrelated runtime file: '+p)
+          print('R382 single-variable C0/03 identity scope PASS')
+          PY
+
+      - name: Build Makerdiary r382 identity probe
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-R382-IDPROBE-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_JC2_VOLATILE_START=1 -DOPK_G5_JOYCON_SIDE=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-R382-JCR-Pro2FactoryIdentity-MDK.uf2
+
+      - name: Validate r382 UF2 and raw-page separation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-R382-JCR-Pro2FactoryIdentity-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; max_end=0; min_addr=0xffffffff
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no); min_addr=min(min_addr,addr); max_end=max(max_end,addr+size)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          if max_end > 0xEB000: raise SystemExit(f'UF2 reaches raw trace page: {max_end:#x}')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'F27-R382-IDPROBE-'+short,'build marker'),
+              (b'Joy-Con 2 (R)','physical JCR product'),
+              (b'HEW70006169780','M27 factory serial'),
+              (b'JCR-direct-r380-raw','unchanged r380 observer'),
+              (b'# JT begin','trace dump'),
+          ]:
+              if needle not in image: raise SystemExit('missing '+label)
+          for bad,label in [(b'/jc2trace','trace filesystem path'),(b'/jc2mode','mode filesystem tag')]:
+              if bad in image: raise SystemExit('forbidden '+label)
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data),'range',hex(min_addr)+'..'+hex(max_end))
+          PY
+
+      - name: Record manifest
+        run: |
+          cat > build/mdk/F27-R382-JCR-Pro2FactoryIdentity.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          parent_runtime=r380 1143513e2d9c758010f5a0a42c349aeb27ed6ed5
+          makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          physical_usb_identity=057E:2066 Joy-Con 2 (R), native report 0x08
+          sole_protocol_delta=JOYCON2_FACTORY_ID[64] returned to C0/03 replaced with exact known-working M27 Pro2 SW2_VENDOR_IDENTITY
+          m27_identity_serial=HEW70006169780
+          everything_else=byte-identical accepted r380 runtime after restoring the one changed array
+          trace=unchanged r380 S/R/C/B/G/O raw-page observer, raw page 0xEB000
+          experimental_filesystem_writes=NONE
+          hypothesis=if Switch advances from C0/03 to C0/02, the 64-byte factory identity content is the causal gate
+          required_test=confirm bond; flash r382; verify Steam RF connection; connect Switch >=20s; retrieve JT exactly as r380; return to control and verify bond survives
+          do_not=do not use staged WebUSB firmware update; do not run JC before JT
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-R382-JCR-Pro2FactoryIdentity-MDK.uf2 >> build/mdk/F27-R382-JCR-Pro2FactoryIdentity.manifest.txt
+
+      - name: Upload r382 identity probe
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-R382-JCR-Pro2FactoryIdentity
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-R382-JCR-Pro2FactoryIdentity-MDK.uf2
+            build/mdk/F27-R382-JCR-Pro2FactoryIdentity.manifest.txt
