@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """F27-M30/r386: force session1 JCL live behind the hardware-positive r384 JCR/JCL baseline.
 
-Session 0 remains the accepted JCR path.  Whenever session0 Nintendo state changes,
+Session 0 remains the accepted JCR path. Whenever session0 Nintendo state changes,
 mirror only input/report/feature state into session1 while retaining JCL report 0x07.
 The existing dual-session drain then attempts the second HID stream without requiring
 Nintendo vendor initialization on session1.
@@ -52,7 +52,7 @@ src = replace_once(
 
 helper = r'''
 // r386 discriminator: session1 is deliberately not given synthetic Nintendo
-// vendor traffic.  It only inherits the state that gates native HID streaming.
+// vendor traffic. It only inherits the state that gates native HID streaming.
 static void m30MirrorSession0ToJcl(void)
 {
 	M15Sw2Session &src = g_sw2Sessions[M15_SW2_PRO];
@@ -84,24 +84,20 @@ src = regex_once(
 )
 
 # Split the readiness gate so JT can prove whether HID instance 1 ever became ready.
-src = replace_once(
+# M15-derived revisions may spell the TinyUSB instance as `s` or as the stored
+# per-session hidInstance; preserve whichever expression the accepted baseline uses.
+src = regex_once(
     src,
-    "\t\tif (!g_sw2InputEnabled || !tud_hid_n_ready(s))\n\t\t\tcontinue;",
-    "\t\tif (!g_sw2InputEnabled)\n"
-    "\t\t\tcontinue;\n"
-    "\t\tbool hidReady = tud_hid_n_ready(s);\n"
-    "\t\tif (s == M15_SW2_JOYCON_R)\n"
-    "\t\t\tm30TraceSession1Event(hidReady ? 2 : 1, hidReady, g_sw2ActiveReport);\n"
-    "\t\tif (!hidReady)\n"
-    "\t\t\tcontinue;",
+    r'if\s*\(\s*!g_sw2InputEnabled\s*\|\|\s*!tud_hid_n_ready\(([^)]]+)\)\s*\)\s*\n\s*continue;',
+    '''if (!g_sw2InputEnabled)\n\t\t\tcontinue;\n\t\tbool hidReady = tud_hid_n_ready(\1);\n\t\tif (s == M15_SW2_JOYCON_R)\n\t\t\tm30TraceSession1Event(hidReady ? 2 : 1, hidReady, g_sw2ActiveReport);\n\t\tif (!hidReady)\n\t\t\tcontinue;''',
     "session1 readiness observation",
 )
 
 # Record first actual attempt and first successful queue without altering payload.
 src = regex_once(
     src,
-    r'if \(tud_hid_n_report\(s, rid, p, sizeof p\)\)\s*\n\s*g_sw2LastReportMs = millis\(\);',
-    '''bool queued = tud_hid_n_report(s, rid, p, sizeof p);\n\t\tif (s == M15_SW2_JOYCON_R) {\n\t\t\tm30TraceSession1Event(3, true, rid);\n\t\t\tif (queued)\n\t\t\t\tm30TraceSession1Event(4, true, rid);\n\t\t}\n\t\tif (queued)\n\t\t\tg_sw2LastReportMs = millis();''',
+    r'if\s*\(tud_hid_n_report\(([^,]+),\s*rid,\s*p,\s*sizeof p\)\)\s*\n\s*g_sw2LastReportMs\s*=\s*millis\(\);',
+    '''bool queued = tud_hid_n_report(\1, rid, p, sizeof p);\n\t\tif (s == M15_SW2_JOYCON_R) {\n\t\t\tm30TraceSession1Event(3, true, rid);\n\t\t\tif (queued)\n\t\t\t\tm30TraceSession1Event(4, true, rid);\n\t\t}\n\t\tif (queued)\n\t\t\tg_sw2LastReportMs = millis();''',
     "session1 transmit observation",
 )
 
