@@ -1,0 +1,245 @@
+name: F27 M27 R383 M28G Switch2 grip context
+
+on:
+  push:
+    branches:
+      - f27-m27-r383-grip-context
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Compose Makerdiary support over frozen M27 authority
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+
+      - name: Recover pinned M27 composition and raw-trace authorities
+        run: |
+          set -eu
+          git fetch origin \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250 \
+            2f990e0f3e9401a734427e23e8223f2b9f1be799 \
+            5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8 \
+            fb3ac5f57a2d379b8849d84637c956c05e4a204e \
+            fee33e5e57263074a79f11c8e49382ab0c3a6005 \
+            c2019a50b59098f3564c792ef017de3fe885d140
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 2f990e0f3e9401a734427e23e8223f2b9f1be799:tools/f27_switch2pro_m21.py > tools/f27_switch2pro_m21.py
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+          git show fb3ac5f57a2d379b8849d84637c956c05e4a204e:tools/f27_switch2pro_m25.py > tools/f27_switch2pro_m25.py
+          git show fee33e5e57263074a79f11c8e49382ab0c3a6005:tools/f27_m27_persistent_trace.py > tools/f27_m27_persistent_trace.py
+          git show fee33e5e57263074a79f11c8e49382ab0c3a6005:tools/f27_m27_trace_transform_fixup.py > tools/f27_m27_trace_transform_fixup.py
+          git show fee33e5e57263074a79f11c8e49382ab0c3a6005:tools/f27_m27_r377_rf_gate_runtime.py > tools/f27_m27_r377_rf_gate_runtime.py
+          git show c2019a50b59098f3564c792ef017de3fe885d140:tools/f27_m27_r378_raw_trace.py > tools/f27_m27_r378_raw_trace.py
+
+      - name: Compose exact hardware-positive M27 runtime
+        run: |
+          set -eu
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m25.py
+          python3 tools/f27_switch2pro_m27.py
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/m27-mode_switch2_pro.cpp
+          cp OpenPuck/f27_joycon2.cpp /tmp/m27-f27_joycon2.cpp
+          cp OpenPuck/f27_joycon2.h /tmp/m27-f27_joycon2.h
+          cp OpenPuck/OpenPuck.ino /tmp/m27-OpenPuck.ino
+          cp OpenPuck/config.cpp /tmp/m27-config.cpp
+          cp OpenPuck/bonds.cpp /tmp/m27-bonds.cpp
+          cp Makefile /tmp/m27-Makefile
+
+      - name: Apply M28G Switch 2 Charging Grip context and session hardening
+        run: |
+          set -eu
+          python3 tools/f27_m28g_grip_context.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/m28g-mode_switch2_pro.cpp
+
+      - name: Apply RAM observers and isolated raw-page snapshot
+        run: |
+          set -eu
+          python3 tools/f27_m27_trace_transform_fixup.py
+          python3 tools/f27_m27_persistent_trace.py
+          python3 tools/f27_m27_r377_rf_gate_runtime.py
+          python3 tools/f27_m27_r378_raw_trace.py
+          sed -i 's/M27-working-r378-raw/M27-M28G-grip-r383-raw/g' OpenPuck/mode_switch2_pro.cpp
+          sed -i 's/0x3837544DUL/0x4738544DUL/g' OpenPuck/mode_switch2_pro.cpp
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+
+      - name: Prove frozen M27 behavior, Switch 2 grip provenance and persistence isolation
+        run: |
+          set -eu
+          grep -q 'F27-M27-PROVEN-SESSION1-LEFT-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-M28G-GRIP-CONTEXT' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M24-ROLE-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M26-INPUT-PAYLOAD-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'f27JoyconBuildM27Session1Left' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm27BuildSession1Left' OpenPuck/f27_joycon2.cpp
+          grep -q 'M28G_CHARGING_GRIP_FACTORY' OpenPuck/mode_switch2_pro.cpp
+          grep -q "'H'.*'D'.*'L'.*'5'" OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm28HandleChargingGrip' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'sw2AckHeader(reply, 0x08' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'case 0x08:' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm28DriverOpenCurrent' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_sw2Sessions\[s\].vendorEpOut' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M27_TRACE_RAW_PAGE = 0x000EB000UL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M27_TRACE_RAW_MAGIC = 0x4738544DUL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'source=M27-M28G-grip-r383-raw' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'sess=%u' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'strcmp(line, "JT")' OpenPuck/serial_console.cpp
+          grep -q 'strcmp(line, "JC")' OpenPuck/serial_console.cpp
+          ! grep -q 'M27_TRACE_FILE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'M27_TRACE_TAG' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'Adafruit_LittleFS' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'InternalFileSystem' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch2_pro.cpp
+          cmp -s /tmp/m27-f27_joycon2.cpp OpenPuck/f27_joycon2.cpp || { echo 'M28G changed frozen M27 Joy-Con report builder'; exit 1; }
+          cmp -s /tmp/m27-f27_joycon2.h OpenPuck/f27_joycon2.h || { echo 'M28G changed frozen M27 Joy-Con header'; exit 1; }
+          cmp -s /tmp/m27-OpenPuck.ino OpenPuck/OpenPuck.ino || { echo 'M28G changed OpenPuck.ino'; exit 1; }
+          cmp -s /tmp/m27-config.cpp OpenPuck/config.cpp || { echo 'config.cpp drifted'; exit 1; }
+          cmp -s /tmp/m27-bonds.cpp OpenPuck/bonds.cpp || { echo 'bonds.cpp drifted'; exit 1; }
+          cmp -s /tmp/m27-Makefile Makefile || { echo 'Makefile drifted'; exit 1; }
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          before=Path('/tmp/m27-mode_switch2_pro.cpp').read_text()
+          after=Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          def compact(s): return re.sub(r'\s+', '', s)
+          def arr(src,name):
+              m=re.search(r'static const uint8_t '+re.escape(name)+r'\[[^\]]*\] = \{.*?\n\};',src,re.S)
+              if not m: raise SystemExit('missing '+name)
+              return compact(m.group(0))
+          for name in ('SWITCH2_PRO_HID_DESC','SWITCH2_PRO_CFG_BODY','SW2_VENDOR_IDENTITY','SW2_VENDOR_PROTOCOL'):
+              if arr(before,name) != arr(after,name):
+                  raise SystemExit('M28G changed frozen M27 USB constant '+name)
+          grip=re.search(r'static const uint8_t M28G_CHARGING_GRIP_FACTORY\[64\] = \{(.*?)\n\};', after, re.S)
+          if not grip: raise SystemExit('missing M28G grip factory array')
+          expected_tokens=['0x01','0x00',"'H'", "'D'", "'L'", "'5'", "'0'", "'0'", "'0'", "'3'", "'4'", "'8'", "'5'", "'5'", "'1'", "'9'", '0x00','0x00','0x7e','0x05','0x68','0x20','0x01','0x03','0x01']
+          body=grip.group(1)
+          pos=0
+          for token in expected_tokens:
+              p=body.find(token,pos)
+              if p < 0: raise SystemExit('grip factory prefix mismatch at '+token)
+              pos=p+len(token)
+          if compact(Path('/tmp/m27-f27_joycon2.cpp').read_text()) != compact(Path('OpenPuck/f27_joycon2.cpp').read_text()):
+              raise SystemExit('M28G unexpectedly changed f27_joycon2.cpp')
+          print('M28G frozen-M27 + Switch2 grip scope PASS')
+          PY
+
+      - name: Build Makerdiary M28G r383 grip context
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M28G-R383-GRIP-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-M28G-R383-GripContext-MDK.uf2
+
+      - name: Validate UF2 and raw-page separation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-M28G-R383-GripContext-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; max_end=0; min_addr=0xffffffff
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no); min_addr=min(min_addr,addr); max_end=max(max_end,addr+size)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          if max_end > 0xEB000: raise SystemExit(f'UF2 reaches raw trace page: {max_end:#x}')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'F27-M28G-R383-GRIP-'+short,'build marker'),
+              (b'F27-M27-PROVEN-SESSION1-LEFT-JCR','M27 authority'),
+              (b'F27-M28G-GRIP-CONTEXT','M28G authority'),
+              (b'HDL50003485519','Switch 2 Charging Grip serial'),
+              (b'M27-M28G-grip-r383-raw','trace source'),
+              (b'# JT begin','trace dump'),
+              (b'Switch 2 Pro Controller','working transport identity'),
+          ]:
+              if needle not in image: raise SystemExit('missing '+label)
+          for bad,label in [(b'/jc2trace','trace filesystem path'),(b'/jc2mode','mode filesystem tag')]:
+              if bad in image: raise SystemExit('forbidden '+label)
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data),'range',hex(min_addr)+'..'+hex(max_end))
+          PY
+
+      - name: Record manifest
+        run: |
+          cat > build/mdk/F27-M28G-R383-GripContext.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          frozen_hardware_authority=ec35b5a1a1f454ca48e3b70e5fd973db32e608c3
+          parent_trace_authority=5902f83d67fd78039d9461ab161208ec727bfef1
+          makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          composition=M15 + M21 + M22 + M25 + M27 exact pinned recipe; M27 JCR HID/report behavior unchanged
+          M28G_delta=session-context restoration in USB class open/xfer + Switch-2-specific Charging Grip command 0x08 responder only
+          charging_grip_source=ndeadly/switch2_controller_research@d1c5a7f7ba298f83017fae84952a4e6d2ef8fc92 commands.md; observed Switch 2 command 0x08; serial HDL50003485519; VID:PID 057E:2068
+          joycon1_authority=NONE; original Switch Joy-Con data is non-authoritative and not used for M28G protocol additions
+          logical_sessions=unchanged M27 dual Joy-Con 2 R; session0 remains the proven visible JCR; session1 remains coherent hidden JCR
+          trace=S/R/C/B/G/O raw-page observer; source M27-M28G-grip-r383-raw; raw page 0xEB000; magic 0x4738544D
+          experimental_filesystem_writes=NONE
+          purpose=establish hardware-positive grip-capable M27 baseline before converting session1 to Joy-Con 2 L
+          required_test=verify one JCR and right mouse remain; leave >=20s; retrieve JT; note any cmd=08 records and session index; return to control and verify bond survives
+          do_not=do not use staged WebUSB firmware update; do not run JC before JT
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-M28G-R383-GripContext-MDK.uf2 >> build/mdk/F27-M28G-R383-GripContext.manifest.txt
+
+      - name: Upload M28G r383 grip context
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M28G-R383-GripContext
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-M28G-R383-GripContext-MDK.uf2
+            build/mdk/F27-M28G-R383-GripContext.manifest.txt
