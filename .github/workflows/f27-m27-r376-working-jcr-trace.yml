@@ -1,0 +1,189 @@
+name: F27 M27 R376 working JCR persistent trace
+
+on:
+  push:
+    branches:
+      - f27-m27-r376-working-jcr-trace
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Compose Makerdiary support over exact M27 branch authority
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+
+      - name: Recover pinned M27 composition authorities
+        run: |
+          set -eu
+          git fetch origin \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250 \
+            2f990e0f3e9401a734427e23e8223f2b9f1be799 \
+            5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8 \
+            fb3ac5f57a2d379b8849d84637c956c05e4a204e
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+          git show 2f990e0f3e9401a734427e23e8223f2b9f1be799:tools/f27_switch2pro_m21.py > tools/f27_switch2pro_m21.py
+          git show 5bf3b6f7f57f1ba5c131ca7e1c393a7aa85bb0d8:tools/f27_switch2pro_m22.py > tools/f27_switch2pro_m22.py
+          git show fb3ac5f57a2d379b8849d84637c956c05e4a204e:tools/f27_switch2pro_m25.py > tools/f27_switch2pro_m25.py
+
+      - name: Compose exact hardware-positive M27 runtime
+        run: |
+          set -eu
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          python3 tools/f27_switch2pro_m22.py
+          python3 tools/f27_switch2pro_m25.py
+          python3 tools/f27_switch2pro_m27.py
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/m27-mode_switch2_pro.cpp
+          cp OpenPuck/f27_joycon2.cpp /tmp/m27-f27_joycon2.cpp
+          cp OpenPuck/OpenPuck.ino /tmp/m27-OpenPuck.ino
+          cp Makefile /tmp/m27-Makefile
+
+      - name: Apply observation-only persistent trace
+        run: |
+          set -eu
+          python3 tools/f27_m27_persistent_trace.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+
+      - name: Prove M27 runtime and trace scope
+        run: |
+          set -eu
+          grep -q 'F27-M27-PROVEN-SESSION1-LEFT-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M26-INPUT-PAYLOAD-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M23-JCR-JCL-LEFT-MOUSE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'F27-M24-ROLE-SWAP-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'f27JoyconBuildM27Session1Left' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm27BuildSession1Left' OpenPuck/f27_joycon2.cpp
+          grep -q 'M27_TRACE_FILE\[\] = "/jc2trace.bin"' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm27TracePersistQuiet' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm27TraceQueueControl' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm27TraceAppendBulk' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'switch2ProTraceDump' OpenPuck/serial_console.cpp
+          grep -q 'strcmp(line, "JT")' OpenPuck/serial_console.cpp
+          grep -q 'strcmp(line, "JC")' OpenPuck/serial_console.cpp
+          grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          before=Path('/tmp/m27-mode_switch2_pro.cpp').read_text()
+          after=Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          def compact(s): return re.sub(r'\s+', '', s)
+          def arr(src,name):
+              m=re.search(r'static const uint8_t '+re.escape(name)+r'\[[^\]]*\] = \{.*?\n\};',src,re.S)
+              if not m: raise SystemExit('missing '+name)
+              return compact(m.group(0))
+          for name in ('SWITCH2_PRO_HID_DESC','SWITCH2_PRO_CFG_BODY','SW2_VENDOR_IDENTITY','SW2_VENDOR_PROTOCOL'):
+              if arr(before,name) != arr(after,name):
+                  raise SystemExit('R376 changed frozen M27 USB constant '+name)
+          # M27 Joy-Con report builder source itself is untouched by the trace transform.
+          if compact(Path('/tmp/m27-f27_joycon2.cpp').read_text()) != compact(Path('OpenPuck/f27_joycon2.cpp').read_text()):
+              raise SystemExit('R376 unexpectedly changed f27_joycon2.cpp')
+          if compact(Path('/tmp/m27-OpenPuck.ino').read_text()) != compact(Path('OpenPuck/OpenPuck.ino').read_text()):
+              raise SystemExit('R376 unexpectedly changed OpenPuck.ino')
+          if Path('/tmp/m27-Makefile').read_text() != Path('Makefile').read_text():
+              raise SystemExit('R376 unexpectedly changed Makefile')
+          print('R376 working-M27 trace scope PASS')
+          PY
+
+      - name: Build Makerdiary M27 trace control
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M27-R376-TRACE-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex \
+            build/mdk/OpenPuck-F27-M27-R376-WorkingJCR-Trace-MDK.uf2
+
+      - name: Validate R376 UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-M27-R376-WorkingJCR-Trace-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'F27-M27-R376-TRACE-'+short,'build marker'),
+              (b'F27-M27-PROVEN-SESSION1-LEFT-JCR','M27 authority'),
+              (b'/jc2trace.bin','persistent trace path'),
+              (b'# JT begin','trace dump'),
+              (b'Switch 2 Pro Controller','working transport identity'),
+          ]:
+              if needle not in image: raise SystemExit('missing '+label)
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data))
+          PY
+
+      - name: Record manifest
+        run: |
+          cat > build/mdk/F27-M27-R376-WorkingJCR-Trace.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          parent_hardware_authority=M27 ec35b5a1a1f454ca48e3b70e5fd973db32e608c3 hardware-positive JCR session1/native report path
+          makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          composition=M15 + M21 + M22 + M25 + M27 exact pinned recipe
+          behavior_delta=observation-only trace hooks; USB descriptors/replies and f27 Joy-Con report builders unchanged
+          trace_file=/jc2trace.bin
+          trace_records=S start, R reset, C device vendor-control, B Nintendo bulk, G HID GET_REPORT, O HID SET_REPORT
+          trace_persistence=RAM during activity; LittleFS batch after >=1000ms silence
+          dump=CDC JT; clear=CDC JC
+          purpose=working control trace for direct comparison to failing native-JCR R375 trace
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-M27-R376-WorkingJCR-Trace-MDK.uf2 >> build/mdk/F27-M27-R376-WorkingJCR-Trace.manifest.txt
+
+      - name: Upload R376 control trace
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M27-R376-WorkingJCR-Trace
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-M27-R376-WorkingJCR-Trace-MDK.uf2
+            build/mdk/F27-M27-R376-WorkingJCR-Trace.manifest.txt
