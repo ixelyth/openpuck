@@ -3,7 +3,7 @@
 
 Applied after f27_g5_integrate.py and f27_g5_re_refresh.py.  It fixes the
 MODE_NAME[13] out-of-bounds read and replaces the old permanent forced mode
-with a once-per-build Joy-Con startup so subsequent mode changes work normally.
+with a once-per-variant Joy-Con startup so subsequent mode changes work normally.
 """
 from pathlib import Path
 
@@ -27,9 +27,15 @@ old = (
 new = (
     "\tloadCfg();\n"
     "#if defined(OPK_JC2_START_ONCE) && OPK_JC2_START_ONCE\n"
+    "#ifndef OPK_JC2_START_VARIANT\n"
+    "#define OPK_JC2_START_VARIANT 0\n"
+    "#endif\n"
     "\t{\n"
     "\t\tstatic const char tagPath[] = \"/jc2mode\";\n"
-    "\t\tchar tag[24] = { 0 };\n"
+    "\t\tchar tag[32] = { 0 };\n"
+    "\t\tchar currentTag[32] = { 0 };\n"
+    "\t\tsnprintf(currentTag, sizeof currentTag, \"%s-%u\", OPK_GIT_HASH,\n"
+    "\t\t\t (unsigned)OPK_JC2_START_VARIANT);\n"
     "\t\tbool startJoyCon2 = true;\n"
     "\t\tFile f(InternalFS);\n"
     "\t\tif (f.open(tagPath, FILE_O_READ)) {\n"
@@ -37,7 +43,7 @@ new = (
     "\t\t\tif (n > 0)\n"
     "\t\t\t\ttag[n] = 0;\n"
     "\t\t\tf.close();\n"
-    "\t\t\tstartJoyCon2 = strncmp(tag, OPK_GIT_HASH, sizeof tag - 1) != 0;\n"
+    "\t\t\tstartJoyCon2 = strncmp(tag, currentTag, sizeof tag - 1) != 0;\n"
     "\t\t}\n"
     "\t\tif (startJoyCon2) {\n"
     "\t\t\tg_usbMode = MODE_JOYCON2;\n"
@@ -45,7 +51,7 @@ new = (
     "\t\t\tInternalFS.remove(tagPath);\n"
     "\t\t\tFile g(InternalFS);\n"
     "\t\t\tif (g.open(tagPath, FILE_O_WRITE)) {\n"
-    "\t\t\t\tg.write((const uint8_t *)OPK_GIT_HASH, strlen(OPK_GIT_HASH));\n"
+    "\t\t\t\tg.write((const uint8_t *)currentTag, strlen(currentTag));\n"
     "\t\t\t\tg.close();\n"
     "\t\t\t}\n"
     "\t\t}\n"
