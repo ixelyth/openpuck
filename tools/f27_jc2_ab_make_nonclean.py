@@ -36,8 +36,6 @@ cfg_re = re.compile(
 src, n = cfg_re.subn("\n", src, count=1)
 if n != 1:
     raise SystemExit("JC2 B configuration-wrapper block anchor mismatch")
-src = src.replace('"F27-G5-CLEAN-JCR-GRIP08"', '"F27-JC2-AB-B-NONCLEAN-JCR"')
-src = src.replace('"F27-G5-CLEAN-JCL-GRIP08"', '"F27-JC2-AB-B-NONCLEAN-JCL"')
 p.write_text(src, encoding="utf-8")
 
 p = Path("OpenPuck/OpenPuck.ino")
