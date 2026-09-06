@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Adapt the generic M27 trace transform to the exact composed dual-session source."""
 from pathlib import Path
+import ast
 import re
 
 p = Path("tools/f27_m27_persistent_trace.py")
@@ -23,7 +24,7 @@ pat = re.compile(
     re.S,
 )
 repl = '''src = replace_once(\n    src,\n    "{\\n\\tif (g_usbMode == MODE_SW2_PRO && itf < M15_SW2_SESSION_COUNT) {\\n",\n    "{\\n\\tif (g_usbMode == MODE_SW2_PRO && itf < M15_SW2_SESSION_COUNT) {\\n"\n    "\\t\\tm27TraceQueueHid('O', reportId, reportType, size);\\n",\n    "HID SET trace",\n)'''
-s, n = pat.subn(repl, s, count=1)
+s, n = pat.subn(lambda _: repl, s, count=1)
 if n != 1:
     raise SystemExit("trace-fixup HID SET block mismatch")
 
@@ -34,15 +35,24 @@ pat = re.compile(
     re.S,
 )
 repl = '''src = replace_once(\n    src,\n    "void Switch2ProController::beginPool()\\n{\\n",\n    "void Switch2ProController::beginPool()\\n{\\n\\tm27TracePrepare();\\n",\n    "trace prepare",\n)'''
-s, n = pat.subn(repl, s, count=1)
+s, n = pat.subn(lambda _: repl, s, count=1)
 if n != 1:
     raise SystemExit("trace-fixup beginPool block mismatch")
 
 # The M27 transport has two independent vendor endpoints. Preserve the r375
 # record shape but use the final byte to identify which session received each
 # bulk command; that is more valuable than command byte 11 for this control.
+if "r.k = n > 11 ? cmd[11] : 0;" not in s:
+    raise SystemExit("trace-fixup bulk session field anchor missing")
 s = s.replace("r.k = n > 11 ? cmd[11] : 0;", "r.k = g_sw2SessionCtx;", 1)
-s = s.replace("p=%02X%02X%02X%02X\\\\n", "p=%02X%02X%02X sess=%u\\\\n", 1)
+old_dump = "p=%02X%02X%02X%02X\\n"
+new_dump = "p=%02X%02X%02X sess=%u\\n"
+if old_dump not in s:
+    raise SystemExit("trace-fixup bulk dump anchor missing")
+s = s.replace(old_dump, new_dump, 1)
 
+# Fail here, before touching the composed firmware source, if this meta-transform
+# accidentally creates invalid Python.
+ast.parse(s, filename=str(p))
 p.write_text(s, encoding="utf-8")
 print("F27 M27 trace transform adapted to dual-session runtime")
