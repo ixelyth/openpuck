@@ -38,14 +38,12 @@ for forbidden in (
     if forbidden in src:
         raise SystemExit(f"F27-M28G forbidden/already-applied marker present: {forbidden}")
 
-src = replace_once(
+# clang-format can keep this declaration on one line or split before the string.
+# Match semantics, not pre-format whitespace, while still requiring one unique M27 marker.
+src = regex_once(
     src,
-    'static const char M27_BUILD_MARKER[] __attribute__((used)) =\n'
-    '\t"F27-M27-PROVEN-SESSION1-LEFT-JCR";\n',
-    'static const char M27_BUILD_MARKER[] __attribute__((used)) =\n'
-    '\t"F27-M27-PROVEN-SESSION1-LEFT-JCR";\n'
-    'static const char M28G_BUILD_MARKER[] __attribute__((used)) =\n'
-    '\t"F27-M28G-GRIP-CONTEXT";\n',
+    r'''static\s+const\s+char\s+M27_BUILD_MARKER\[\]\s*__attribute__\(\(used\)\)\s*=\s*"F27-M27-PROVEN-SESSION1-LEFT-JCR";''',
+    '''static const char M27_BUILD_MARKER[] __attribute__((used)) =\n\t"F27-M27-PROVEN-SESSION1-LEFT-JCR";\nstatic const char M28G_BUILD_MARKER[] __attribute__((used)) =\n\t"F27-M28G-GRIP-CONTEXT";''',
     "build marker",
 )
 
@@ -87,23 +85,23 @@ static uint8_t m28HandleChargingGrip(const uint8_t *cmd, uint8_t n,
 '''
 src = replace_once(
     src,
-    "\nstatic void sw2BuildVendorReply(void)\n",
-    "\n" + grip_impl + "static void sw2BuildVendorReply(void)\n",
+    "static void sw2BuildVendorReply(void)",
+    grip_impl + "static void sw2BuildVendorReply(void)",
     "Charging Grip implementation",
 )
 
+# Insert command 0x08 as its own case without rewriting the existing 0x07 body.
 src = replace_once(
     src,
-    "\tcase 0x07:\n\t\treplyLen = sw2QueueDataHeader(id, seq, sub, reply);\n",
-    "\tcase 0x08:\n\t\treplyLen = m28HandleChargingGrip(cmd, n, reply);\n\t\tbreak;\n"
-    "\tcase 0x07:\n\t\treplyLen = sw2QueueDataHeader(id, seq, sub, reply);\n",
+    "case 0x07:",
+    "case 0x08:\n\t\treplyLen = m28HandleChargingGrip(cmd, n, reply);\n\t\tbreak;\n\tcase 0x07:",
     "Charging Grip command dispatch",
 )
 
 # M23 exposed that the dual-session class driver could return from a
 # session-specific endpoint callback while g_sw2SessionCtx still named session1.
 # Rebuild open/xfer routing so shared/device-level work always resumes in session0.
-open_pattern = r'''static uint16_t sw2DriverOpen\(uint8_t rhport, tusb_desc_interface_t const \*itf,\n\s+uint16_t maxLen\)\n\{.*?\n\}\n\n(?=static bool sw2DriverControl)'''
+open_pattern = r'''static\s+uint16_t\s+sw2DriverOpen\(uint8_t\s+rhport,\s*tusb_desc_interface_t\s+const\s+\*itf,\s*uint16_t\s+maxLen\)\s*\{.*?\n\}\s*\n(?=static\s+bool\s+sw2DriverControl)'''
 open_repl = r'''static uint16_t m28DriverOpenCurrent(uint8_t rhport,
 				     tusb_desc_interface_t const *itf,
 				     uint16_t maxLen)
@@ -169,7 +167,7 @@ static uint16_t sw2DriverOpen(uint8_t rhport, tusb_desc_interface_t const *itf,
 '''
 src = regex_once(src, open_pattern, open_repl, "session-safe driver open")
 
-xfer_pattern = r'''static bool sw2DriverXfer\(uint8_t rhport, uint8_t ep, xfer_result_t result,\n\s+uint32_t transferred\)\n\{.*?\n\}\n\n(?=static const usbd_class_driver_t g_sw2Driver)'''
+xfer_pattern = r'''static\s+bool\s+sw2DriverXfer\(uint8_t\s+rhport,\s*uint8_t\s+ep,\s*xfer_result_t\s+result,\s*uint32_t\s+transferred\)\s*\{.*?\n\}\s*\n(?=static\s+const\s+usbd_class_driver_t\s+g_sw2Driver)'''
 xfer_repl = r'''static bool sw2DriverXfer(uint8_t rhport, uint8_t ep, xfer_result_t result,
 			  uint32_t transferred)
 {
@@ -210,20 +208,19 @@ xfer_repl = r'''static bool sw2DriverXfer(uint8_t rhport, uint8_t ep, xfer_resul
 '''
 src = regex_once(src, xfer_pattern, xfer_repl, "session-safe driver xfer")
 
-src = replace_once(
+# Add per-session grip state reset to the M15/M27 session loop, tolerating format.
+src = regex_once(
     src,
-    "\t\tg_sw2LastRumbleRight = 0;\n\t}\n\tg_sw2SessionCtx = M15_SW2_PRO;\n}",
-    "\t\tg_sw2LastRumbleRight = 0;\n"
-    "\t\tg_m28GripButtonsEnabled[s] = false;\n"
-    "\t}\n\tg_sw2SessionCtx = M15_SW2_PRO;\n}",
+    r'''g_sw2LastRumbleRight\s*=\s*0;\s*\n\s*\}\s*\n\s*g_sw2SessionCtx\s*=\s*M15_SW2_PRO;\s*\n\}''',
+    '''g_sw2LastRumbleRight = 0;\n\t\tg_m28GripButtonsEnabled[s] = false;\n\t}\n\tg_sw2SessionCtx = M15_SW2_PRO;\n}''',
     "grip state reset",
 )
 
+# Keep the M28G marker live in the same no-op retention site as M27.
 src = replace_once(
     src,
-    '\tasm volatile("" : : "r"(M27_BUILD_MARKER) : "memory");\n',
-    '\tasm volatile("" : : "r"(M27_BUILD_MARKER) : "memory");\n'
-    '\tasm volatile("" : : "r"(M28G_BUILD_MARKER) : "memory");\n',
+    'asm volatile("" : : "r"(M27_BUILD_MARKER) : "memory");',
+    'asm volatile("" : : "r"(M27_BUILD_MARKER) : "memory");\n\tasm volatile("" : : "r"(M28G_BUILD_MARKER) : "memory");',
     "retain marker",
 )
 
