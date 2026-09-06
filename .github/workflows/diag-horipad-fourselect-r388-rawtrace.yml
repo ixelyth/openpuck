@@ -1,0 +1,153 @@
+name: R388 HORIPAD FourSelect raw-trace positive control
+
+on:
+  push:
+    branches:
+      - diag-horipad-fourselect-r388-rawtrace
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Verify historical FourSelect source base
+        run: |
+          set -eu
+          BASE=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          for f in OpenPuck/mode_switch_hori.cpp OpenPuck/mode_switch_hori.h OpenPuck/serial_console.cpp OpenPuck/usb_tx.cpp OpenPuck/OpenPuck.ino OpenPuck/bonds.cpp OpenPuck/config.cpp Makefile; do
+            git show "$BASE:$f" > /tmp/base
+            cmp -s /tmp/base "$f" || { echo "historical FourSelect base drift: $f"; exit 1; }
+          done
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Apply exact historical Makerdiary patch
+        run: |
+          set -eu
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+
+      - name: Apply exact FourSelect plus trace-only observer
+        run: |
+          set -eu
+          cp OpenPuck/usb_tx.cpp /tmp/pre-usb_tx.cpp
+          cp OpenPuck/OpenPuck.ino /tmp/pre-ino
+          cp OpenPuck/bonds.cpp /tmp/pre-bonds
+          cp OpenPuck/config.cpp /tmp/pre-config
+          cp Makefile /tmp/pre-Makefile
+          python3 tools/diag_horipad_fourselect_r388_trace.py
+          make format
+          make check
+          git diff --check
+
+      - name: Prove trace-only scope and FourSelect invariants
+        run: |
+          set -eu
+          grep -q 'USBDevice.setID(0x0F0D, 0x0092)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'USBDevice.setProductDescriptor("POKKEN CONTROLLER")' OpenPuck/mode_switch_hori.cpp
+          grep -q 'static Adafruit_USBD_HID g_switch\[NSLOT\]' OpenPuck/mode_switch_hori.cpp
+          grep -q 'TB_L4, TB_R4, TB_L5, TB_R5' OpenPuck/mode_switch_hori.cpp
+          grep -q 'all four HIDs are mounted' OpenPuck/mode_switch_hori.cpp
+          grep -q 'usbTxHid(&g_switch\[u\], 0, p, 8)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'H4_TRACE_PAGE = 0x000EB000UL' OpenPuck/mode_switch_hori.cpp
+          grep -q 'H4_TRACE_MAGIC = 0x38543448UL' OpenPuck/mode_switch_hori.cpp
+          grep -q 'source=HORIPAD-FourSelect-r388-raw' OpenPuck/mode_switch_hori.cpp
+          grep -q 'switchHoriTraceDump' OpenPuck/serial_console.cpp
+          grep -q 'switchHoriTraceClear' OpenPuck/serial_console.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch_hori.cpp
+          ! grep -q 'LittleFS' OpenPuck/mode_switch_hori.cpp
+          cmp -s /tmp/pre-usb_tx.cpp OpenPuck/usb_tx.cpp || { echo 'r388 changed proven usb_tx send path'; exit 1; }
+          cmp -s /tmp/pre-ino OpenPuck/OpenPuck.ino || { echo 'r388 changed OpenPuck.ino'; exit 1; }
+          cmp -s /tmp/pre-bonds OpenPuck/bonds.cpp || { echo 'r388 changed bonds.cpp'; exit 1; }
+          cmp -s /tmp/pre-config OpenPuck/config.cpp || { echo 'r388 changed config.cpp'; exit 1; }
+          cmp -s /tmp/pre-Makefile Makefile || { echo 'r388 changed Makefile'; exit 1; }
+
+      - name: Build Makerdiary r388
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="HORI4SEL-R388-TRACE-${short}" ./gen_version.sh
+          make build-mdk
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-HORIPAD-FourSelect-R388-RawTrace-MDK.uf2
+
+      - name: Validate UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-HORIPAD-FourSelect-R388-RawTrace-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; lo=0xffffffff; hi=0
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              if total is None: total=nblocks; fam=family
+              if nblocks!=total or family!=fam: raise SystemExit('metadata mismatch')
+              seen.append(no); lo=min(lo,addr); hi=max(hi,addr+size)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          if fam != 0xADA52840: raise SystemExit('wrong family')
+          if hi > 0xEB000: raise SystemExit(f'UF2 reaches trace page: {hi:#x}')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'HORI4SEL-R388-TRACE-'+short,'build marker'),
+              (b'HORIPAD-FourSelect-r388-raw','trace source'),
+              (b'POKKEN CONTROLLER','HORIPAD identity'),
+              (b'# JT begin','JT dump')]:
+              if needle not in image: raise SystemExit('missing '+label)
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data),'range',hex(lo)+'..'+hex(hi))
+          PY
+
+      - name: Record manifest
+        run: |
+          cat > build/mdk/HORIPAD-FourSelect-R388-RawTrace.manifest.txt <<EOF
+          source_commit=${GITHUB_SHA}
+          hardware_positive_fourselect_authority=0bd8a4d1f3ef892435110a1ef2fc9f6edf288ebd workflow-derived exact transform
+          base_commit=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          historical_mdk_patch=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          identity=0F0D:0092 HORI CO.,LTD. / POKKEN CONTROLLER
+          topology=4 existing HORIPAD HID interfaces; L4/R4/L5/R5 FourSelect unchanged
+          trace=per-HID first not-ready/ready/report-enqueue events; raw page 0xEB000 magic 0x38543448; JT/JC commands
+          proven_send_path=usbTxHid and usb_tx.cpp unchanged
+          experimental_filesystem_writes=NONE
+          hardware_status=PENDING_RETRACE; historical untraced topology is HARDWARE PASS
+          EOF
+          sha256sum build/mdk/OpenPuck-HORIPAD-FourSelect-R388-RawTrace-MDK.uf2 >> build/mdk/HORIPAD-FourSelect-R388-RawTrace.manifest.txt
+
+      - name: Upload r388
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-HORIPAD-FourSelect-R388-RawTrace
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-HORIPAD-FourSelect-R388-RawTrace-MDK.uf2
+            build/mdk/HORIPAD-FourSelect-R388-RawTrace.manifest.txt
