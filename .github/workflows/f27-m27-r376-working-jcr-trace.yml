@@ -76,6 +76,7 @@ jobs:
       - name: Apply observation-only persistent trace
         run: |
           set -eu
+          python3 tools/f27_m27_trace_transform_fixup.py
           python3 tools/f27_m27_persistent_trace.py
           make format
           make check
@@ -99,6 +100,7 @@ jobs:
           grep -q 'strcmp(line, "JT")' OpenPuck/serial_console.cpp
           grep -q 'strcmp(line, "JC")' OpenPuck/serial_console.cpp
           grep -q 'OPK_BOARD_MDK_USB_DONGLE' Makefile
+          grep -q 'sess=%u' OpenPuck/mode_switch2_pro.cpp
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -171,7 +173,7 @@ jobs:
           composition=M15 + M21 + M22 + M25 + M27 exact pinned recipe
           behavior_delta=observation-only trace hooks; USB descriptors/replies and f27 Joy-Con report builders unchanged
           trace_file=/jc2trace.bin
-          trace_records=S start, R reset, C device vendor-control, B Nintendo bulk, G HID GET_REPORT, O HID SET_REPORT
+          trace_records=S start, R reset, C device vendor-control, B Nintendo bulk including session index, G HID GET_REPORT, O HID SET_REPORT
           trace_persistence=RAM during activity; LittleFS batch after >=1000ms silence
           dump=CDC JT; clear=CDC JC
           purpose=working control trace for direct comparison to failing native-JCR R375 trace
