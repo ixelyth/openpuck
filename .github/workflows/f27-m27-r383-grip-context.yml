@@ -69,7 +69,7 @@ jobs:
           git show fee33e5e57263074a79f11c8e49382ab0c3a6005:tools/f27_m27_r377_rf_gate_runtime.py > tools/f27_m27_r377_rf_gate_runtime.py
           git show c2019a50b59098f3564c792ef017de3fe885d140:tools/f27_m27_r378_raw_trace.py > tools/f27_m27_r378_raw_trace.py
 
-      - name: Compose exact hardware-positive M27 runtime
+      - name: Compose and freeze formatted hardware-positive M27 runtime
         run: |
           set -eu
           python3 tools/f27_switch2pro_m15.py
@@ -77,6 +77,10 @@ jobs:
           python3 tools/f27_switch2pro_m22.py
           python3 tools/f27_switch2pro_m25.py
           python3 tools/f27_switch2pro_m27.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
           cp OpenPuck/mode_switch2_pro.cpp /tmp/m27-mode_switch2_pro.cpp
           cp OpenPuck/f27_joycon2.cpp /tmp/m27-f27_joycon2.cpp
           cp OpenPuck/f27_joycon2.h /tmp/m27-f27_joycon2.h
