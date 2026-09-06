@@ -111,12 +111,17 @@ src = replace_once(
     "mirror/helper insertion",
 )
 
-# Mirror state after a session0 Nintendo bulk handler updates gating/features.
-src = regex_once(
+# Mirror at the beginning of each valid drain cycle. This intentionally occurs
+# outside sw2BuildVendorReply so the frozen r381/r384 bulk-observer anchor stays
+# byte-exact. A command processed in one loop is reflected to session1 on the
+# next loop, before any subsequent periodic stream opportunity.
+src = replace_once(
     src,
-    r'(\n\s*uint8_t first = replyLen > sizeof g_sw2VendorReply \?)',
-    '\n\tif (g_sw2SessionCtx == M15_SW2_PRO)\n\t\tm30MirrorSession0ToJcl();\n\1',
-    "post-command mirror",
+    "\tif (g_usbMode != MODE_SW2_PRO || g_usbMountCount == 0)\n\t\treturn;\n\n\tint bond = g_usbToBond[0];",
+    "\tif (g_usbMode != MODE_SW2_PRO || g_usbMountCount == 0)\n\t\treturn;\n\n"
+    "\tm30MirrorSession0ToJcl();\n\n"
+    "\tint bond = g_usbToBond[0];",
+    "drain-cycle state mirror",
 )
 
 MODE.write_text(src, encoding="utf-8")
