@@ -36,6 +36,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-format-18
 
+      # Wrapper enables shell tracing so any scope-proof failure is explicit.
       - name: Compose validate and build r384 JCR-JCL
         run: bash tools/f27_m29_ci_v3.sh R-L r384
 
