@@ -105,7 +105,8 @@ src = regex_once(
 # Preserve the accepted drain logic: wrap only its one readiness call.
 ready_calls = list(re.finditer(r'tud_hid_n_ready\(([^)]+)\)', src))
 if len(ready_calls) != 1:
-    raise SystemExit(f"M30 expected one tud_hid_n_ready call, found {len(ready_calls)}")nm = ready_calls[0]
+    raise SystemExit(f"M30 expected one tud_hid_n_ready call, found {len(ready_calls)}")
+m = ready_calls[0]
 src = src[:m.start()] + f"m30HidReady(s, {m.group(1)})" + src[m.end():]
 
 # Likewise wrap only the native periodic report submission call.
