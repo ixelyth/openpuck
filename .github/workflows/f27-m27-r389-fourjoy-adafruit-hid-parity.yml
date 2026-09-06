@@ -1,0 +1,196 @@
+name: F27 M27 R389 four Joy-Con Adafruit HID parity
+
+on:
+  push:
+    branches:
+      - f27-m27-r389-fourjoy-adafruit-hid-parity
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Reconstruct and prove accepted r384 baseline
+        run: |
+          set -eu
+          bash tools/f27_m29_ci_v3.sh R-L r384
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/r384-mode.cpp
+          cp OpenPuck/f27_joycon2.cpp /tmp/r384-joy.cpp
+          cp OpenPuck/f27_joycon2.h /tmp/r384-joy.h
+          cp OpenPuck/OpenPuck.ino /tmp/r384-ino
+          cp OpenPuck/config.cpp /tmp/r384-config
+          cp OpenPuck/bonds.cpp /tmp/r384-bonds
+          cp Makefile /tmp/r384-Makefile
+
+      - name: Apply M32 Adafruit HID infrastructure parity
+        run: |
+          set -eu
+          python3 tools/f27_m32_adafruit_hid_parity.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+
+      - name: Prove r389 scope and infrastructure parity
+        run: |
+          set -eu
+          grep -q 'F27-M32-ADA-HID-PARITY' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M32_HID_COUNT = 4' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M32_JCL_HID_DESC\[100\]' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M32_JCR_HID_DESC\[100\]' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'static Adafruit_USBD_HID g_m32SiblingHid\[3\]' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m32SiblingHid\[i\].enableOutEndpoint(true)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m32SiblingHid\[i\].setReportDescriptor' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m32SiblingHid\[i\].setPollInterval(4)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m32SiblingHid\[i\].begin()' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'USBDevice.addInterface(g_m32SiblingHid\[i\])' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'itf->bInterfaceNumber >= 5' OpenPuck/mode_switch2_pro.cpp
+          grep -q '__real_tud_hid_descriptor_report_cb(itf)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m32SiblingHid\[hid - 1u\].ready()' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'usbTxHid(&g_m32SiblingHid\[hid - 1u\]' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'mask == 0x03 || mask == 0x0c' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'out\[3\] &= 0x3f' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M27-M32-ADA-HID-r389-raw' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M27_TRACE_RAW_MAGIC = 0x39334D52UL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'hid=%u phase=%u ready=%u rid=%02X side=%c sel=%02X' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'extraIn\[3\]' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'M27_TRACE_FILE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'M27_TRACE_TAG' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'Adafruit_LittleFS' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'InternalFileSystem' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch2_pro.cpp
+          cmp -s /tmp/r384-joy.cpp OpenPuck/f27_joycon2.cpp || { echo 'M32 changed frozen Joy-Con builder module'; exit 1; }
+          cmp -s /tmp/r384-joy.h OpenPuck/f27_joycon2.h || { echo 'M32 changed Joy-Con header'; exit 1; }
+          cmp -s /tmp/r384-ino OpenPuck/OpenPuck.ino || { echo 'M32 changed OpenPuck.ino'; exit 1; }
+          cmp -s /tmp/r384-config OpenPuck/config.cpp || { echo 'M32 changed config.cpp'; exit 1; }
+          cmp -s /tmp/r384-bonds OpenPuck/bonds.cpp || { echo 'M32 changed bonds.cpp'; exit 1; }
+          cmp -s /tmp/r384-Makefile Makefile || { echo 'M32 changed Makefile'; exit 1; }
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          before=Path('/tmp/r384-mode.cpp').read_text()
+          after=Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          def compact(s): return re.sub(r'\s+', '', s)
+          def arr(src,name):
+              m=re.search(r'static const uint8_t '+re.escape(name)+r'\[[^\]]*\] = \{.*?\n\};',src,re.S)
+              if not m: raise SystemExit('missing array '+name)
+              return compact(m.group(0))
+          for name in ('SWITCH2_PRO_HID_DESC','SWITCH2_PRO_CFG_BODY','SW2_VENDOR_IDENTITY','SW2_VENDOR_PROTOCOL','M28G_CHARGING_GRIP_FACTORY'):
+              if arr(before,name) != arr(after,name):
+                  raise SystemExit('M32 changed frozen r384 transport/grip array '+name)
+          def klass(src):
+              m=re.search(r'class Switch2ProUsbInterface : public Adafruit_USBD_Interface \{.*?\n\};\nstatic Switch2ProUsbInterface g_sw2Usb\[M15_SW2_SESSION_COUNT\]',src,re.S)
+              if not m: raise SystemExit('missing Switch2ProUsbInterface class')
+              return compact(m.group(0))
+          if klass(before) != klass(after):
+              raise SystemExit('M32 changed frozen M27 custom interface class')
+          if after.count('USBDevice.addInterface(g_sw2Usb[M15_SW2_PRO]);') != 1:
+              raise SystemExit('session0 custom function mount not unique')
+          if 'USBDevice.addInterface(g_sw2Usb[M15_SW2_JOYCON_R]);' in after:
+              raise SystemExit('old full Nintendo session1 still mounted')
+          print('M32 r384-preserving Adafruit-HID parity scope PASS')
+          PY
+
+      - name: Build Makerdiary r389
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M32-R389-ADAHID-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-M32-R389-FourJoy-AdafruitHID-MDK.uf2
+
+      - name: Validate UF2 and raw-page separation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-M32-R389-FourJoy-AdafruitHID-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; lo=0xffffffff; hi=0
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              if total is None: total=nblocks; fam=family
+              if nblocks!=total or family!=fam: raise SystemExit('metadata mismatch')
+              seen.append(no); lo=min(lo,addr); hi=max(hi,addr+size)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          if fam != 0xADA52840: raise SystemExit('wrong family')
+          if hi > 0xEB000: raise SystemExit(f'UF2 reaches raw trace page: {hi:#x}')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'F27-M32-R389-ADAHID-'+short,'build marker'),
+              (b'F27-M32-ADA-HID-PARITY','M32 marker'),
+              (b'F27-M27-PROVEN-SESSION1-LEFT-JCR','M27 authority'),
+              (b'F27-M28G-GRIP-CONTEXT','M28G authority'),
+              (b'F27-M29-JCR-JCL-PAIR','M29 authority'),
+              (b'M27-M32-ADA-HID-r389-raw','trace source'),
+              (b'# JT begin','JT dump'),
+          ]:
+              if needle not in image: raise SystemExit('missing '+label)
+          for bad in (b'/jc2trace',b'/jc2mode'):
+              if bad in image: raise SystemExit('forbidden persistence path '+repr(bad))
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data),'range',hex(lo)+'..'+hex(hi))
+          PY
+
+      - name: Record manifest
+        run: |
+          cat > build/mdk/F27-M32-R389-FourJoy-AdafruitHID.manifest.txt <<EOF
+          source_commit=${GITHUB_SHA}
+          base_hardware_authority=r384 54ed85fdda92faeafcf58e7c4a9da94a7af5b915
+          frozen_m27_authority=ec35b5a1a1f454ca48e3b70e5fd973db32e608c3
+          physical_usb_shell=exact M27/r384 Switch 2 Pro session0 bootstrap; one physical nRF USB address
+          hid0=JCR A native 0x08 via existing custom M27 HID0
+          hid1=JCL A native 0x07 via real Adafruit_USBD_HID object
+          hid2=JCR B native 0x08 via real Adafruit_USBD_HID object
+          hid3=JCL B native 0x07 via real Adafruit_USBD_HID object
+          vendor_sessions=1 exact session0 Nintendo vendor session; no fabricated sibling vendor sessions
+          sibling_usb_infrastructure=Adafruit_USBD_HID enableOutEndpoint+setReportDescriptor+setPollInterval+begin+USBDevice.addInterface; same mechanism as hardware-positive HORIPAD r388
+          custom_driver_scope=IF0..4 only; IF5+ explicitly unclaimed for normal TinyUSB HID driver
+          selectors=L4->JCR_A,R4->JCL_A,L5->JCR_B,R5->JCL_B
+          pair_selectors=L4+R4->pair_A,L5+R5->pair_B
+          selector_bits=suppressed from Joy-Con native button bytes; cannot become SL/SR
+          registration_test=first test independent readiness/appearance of each half; then use R for JCR, L for JCL, L+R or ZL+ZR only if both sides independently exist
+          trace=raw page 0xEB000 magic 0x39334D52; S/R/C/B/G/O plus per-HID I readiness/enqueue events; no experimental filesystem writes
+          joycon1_authority=NONE
+          hardware_status=PENDING
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-M32-R389-FourJoy-AdafruitHID-MDK.uf2 >> build/mdk/F27-M32-R389-FourJoy-AdafruitHID.manifest.txt
+
+      - name: Upload r389
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M32-R389-FourJoy-AdafruitHID
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-M32-R389-FourJoy-AdafruitHID-MDK.uf2
+            build/mdk/F27-M32-R389-FourJoy-AdafruitHID.manifest.txt
