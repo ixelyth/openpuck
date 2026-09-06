@@ -2,7 +2,8 @@
 """F27-M29: convert the hardware-positive M28G/M27 dual-JCR baseline into a coherent Joy-Con 2 R/L pair.
 
 Only Switch-2/Joy-Con-2-specific side semantics are used. Original Switch/Joy-Con
-protocol data is deliberately non-authoritative for this transform.
+protocol data is deliberately non-authoritative for this transform. The proven
+M27 Pro2 EP0/bootstrap identity is deliberately preserved unchanged.
 """
 
 from pathlib import Path
@@ -34,7 +35,6 @@ args = ap.parse_args()
 s0_right = args.session0 == "JCR"
 order = "JCR-JCL" if s0_right else "JCL-JCR"
 right_expr = "M15_SW2_PRO" if s0_right else "M15_SW2_JOYCON_R"
-left_expr = "M15_SW2_JOYCON_R" if s0_right else "M15_SW2_PRO"
 marker = f"F27-M29-{order}-PAIR"
 
 mode = MODE.read_text(encoding="utf-8")
@@ -50,7 +50,6 @@ for required in (
 if "F27-M29-" in mode:
     raise SystemExit("F27-M29 already applied")
 
-# Add the pair marker after M28G and retain it in the existing marker site.
 mode = regex_once(
     mode,
     r'''(static\s+const\s+char\s+M28G_BUILD_MARKER\[\]\s*__attribute__\(\(used\)\)\s*=\s*"F27-M28G-GRIP-CONTEXT";)''',
@@ -65,9 +64,8 @@ mode = replace_once(
     "retain pair marker",
 )
 
-# M21 intentionally made sw2JoyconR() true for both sessions to select the
-# Joy-Con-family command/feature semantics. Keep that behavior untouched and
-# add separate side helpers for L/R-specific identity/report fields.
+# M21 made sw2JoyconR() true for both sessions so both retain Joy-Con-family
+# feature/command semantics. Keep it untouched; side helpers cover only L/R facts.
 side_helpers = f'''
 static inline bool m29SessionRight(uint8_t session)
 {{
@@ -97,18 +95,12 @@ mode = regex_once(
     "side helpers",
 )
 
-# Shared EP0 factory identity describes the logical side occupying session 0.
-mode = replace_once(
-    mode,
-    "f27JoyconPatchIdentity(g_sw2ControlReply, sizeof g_sw2ControlReply);",
-    "f27JoyconPatchIdentity(g_sw2ControlReply, sizeof g_sw2ControlReply);\n"
-    "\t\tg_sw2ControlReply[20] = m29SessionPidLow(M15_SW2_PRO);\n"
-    "\t\tg_sw2ControlReply[21] = 0x20;",
-    "EP0 logical PID",
-)
+# Important: do NOT alter switch2ProVendorControlXfer/C0/03. r383 proves the
+# Pro2 EP0 identity is a working admission shell. M29 changes only per-session
+# logical identity after that shell has been accepted.
 
-# Per-session factory reads must expose 2066 for R and 2067 for L. This replaces
-# M15/M21's all-JCR 2066 patch while preserving M25's distinct address/serial role.
+# Per-session factory reads expose 2066 for R and 2067 for L while preserving
+# M25's distinct controller-address/serial role assignment.
 mode = regex_once(
     mode,
     r'''if\s*\(sw2JoyconR\(\)\)\s*\{\s*const\s+uint32_t\s+pid\s*=\s*0x00013014u;\s*if\s*\(address\s*<=\s*pid\s*&&\s*pid\s*<\s*address\s*\+\s*len\)\s*block\[pid\s*-\s*address\]\s*=\s*0x66;\s*if\s*\(address\s*<=\s*pid\s*\+\s*1u\s*&&\s*pid\s*\+\s*1u\s*<\s*address\s*\+\s*len\)\s*block\[pid\s*\+\s*1u\s*-\s*address\]\s*=\s*0x20;\s*\}''',
@@ -116,8 +108,7 @@ mode = regex_once(
     "per-session factory PID",
 )
 
-# Native report selection is side-specific: 07=L, 08=R. A generic 09 request is
-# interpreted as "native" on this M27-derived shell and mapped to the side report.
+# 07=L, 08=R. Generic 09 requests are treated as "native" through the Pro2 shell.
 mode = regex_once(
     mode,
     r'''if\s*\(sub\s*==\s*0x0a\s*&&\s*n\s*>=\s*9\)\s*\{.*?\n\s*\}\s*\n\s*return\s+8;''',
@@ -125,8 +116,7 @@ mode = regex_once(
     "side-native report selection",
 )
 
-# Switch-2-specific firmware info: Joy-Con 2 firmware 1.0.14 and side type
-# 0=L / 1=R. This replaces the old Pro2 firmware-type payload only for 0x10/01.
+# Switch-2-specific Joy-Con 2 firmware response: 1.0.14, type 0=L / 1=R.
 mode = regex_once(
     mode,
     r'''case\s+0x10:\s*if\s*\(sub\s*==\s*0x01\)\s*\{\s*static\s+const\s+uint8_t\s+info\[12\]\s*=\s*\{.*?\};\s*sw2DataHeader\(reply,\s*id,\s*seq,\s*sub\);\s*memcpy\(reply\s*\+\s*8,\s*info,\s*sizeof\s+info\);\s*replyLen\s*=\s*20;\s*\}\s*break;''',
@@ -134,7 +124,6 @@ mode = regex_once(
     "Joy-Con 2 firmware type",
 )
 
-# Reset and beginPool defaults must follow the side occupying each session.
 mode = replace_once(
     mode,
     "g_sw2ActiveReport = sw2JoyconR() ? 0x08 : 0x09;",
@@ -148,8 +137,8 @@ mode = replace_once(
     "beginPool native reports",
 )
 
-# Add an exported coherent JCL builder using the existing Switch-2 Joy-Con-2
-# report-0x07 implementation (left buttons/stick/mouse and M3 motion carrier).
+# Coherent JCL builder: same Switch-2 Joy-Con-2 report-0x07 implementation,
+# left buttons/stick/mouse, with the M21/M3-proven motion carrier behavior.
 left_export = r'''
 
 bool f27JoyconBuildM29Left(uint8_t slot, uint8_t features,
@@ -162,28 +151,18 @@ bool f27JoyconBuildM29Left(uint8_t slot, uint8_t features,
 	return true;
 }
 '''
-# Insert after the existing M27 exported helper, before any trailing content.
-match = re.search(
-    r'''bool\s+f27JoyconBuildM27Session1Left\(.*?\n\}\n''', joy, re.S
-)
+match = re.search(r'''bool\s+f27JoyconBuildM27Session1Left\(.*?\n\}\n''', joy, re.S)
 if not match:
     raise SystemExit("F27-M29 M27 exported helper anchor missing")
 joy = joy[:match.end()] + left_export + joy[match.end():]
 
-hdr = replace_once(
+hdr = regex_once(
     hdr,
-    "bool f27JoyconBuildM27Session1Left(uint8_t slot, uint8_t features,\n"
-    "\t\t\t\t   uint8_t *reportId, uint8_t out[63]);",
-    "bool f27JoyconBuildM27Session1Left(uint8_t slot, uint8_t features,\n"
-    "\t\t\t\t   uint8_t *reportId, uint8_t out[63]);\n"
-    "// M29 coherent Joy-Con 2 L builder for whichever logical session is left.\n"
-    "bool f27JoyconBuildM29Left(uint8_t slot, uint8_t features,\n"
-    "\t\t\t   uint8_t *reportId, uint8_t out[63]);",
+    r'''(bool\s+f27JoyconBuildM27Session1Left\([^;]+;)''',
+    r'''\1\n// M29 coherent Joy-Con 2 L builder for whichever logical session is left.\nbool f27JoyconBuildM29Left(uint8_t slot, uint8_t features,\n\t\t\t   uint8_t *reportId, uint8_t out[63]);''',
     "M29 left builder declaration",
 )
 
-# Periodic native stream: keep the known M27 session-0 JCR call when session 0
-# is right; otherwise use the coherent left builder. Session 1 uses the opposite.
 right_call = "f27JoyconBuildNative"
 left_call = "f27JoyconBuildM29Left"
 s0_call = right_call if s0_right else left_call
@@ -196,15 +175,12 @@ mode = regex_once(
     "pair periodic builders",
 )
 
-# Session-aware GET_REPORT mirrors the periodic builder choice.
 mode = regex_once(
     mode,
     r'''\}\s*else\s+if\s*\(itf\s*==\s*M15_SW2_JOYCON_R\)\s*\{\s*if\s*\(reportId\s*==\s*0x08\s*\|\|\s*reportId\s*==\s*0x09\)\s*\{\s*uint8_t\s+rid\s*=\s*reportId;\s*if\s*\(!f27JoyconBuildM27Session1Left\(\(uint8_t\)bond,\s*g_sw2Features,\s*&rid,\s*p\)\)\s*return\s+0;\s*\}\s*else\s+if\s*\(reportId\s*==\s*0x05\)\s*sw2Build05Neutral\(\(uint8_t\)bond,\s*p\);''',
     f'''}} else if (itf == M15_SW2_JOYCON_R) {{\n\t\tif (reportId == 0x05) {{\n\t\t\tsw2Build05Neutral((uint8_t)bond, p);\n\t\t}} else if (reportId == 0x07 || reportId == 0x08 || reportId == 0x09) {{\n\t\t\tuint8_t rid = reportId;\n\t\t\tif (!{s1_call}((uint8_t)bond, g_sw2Features, &rid, p))\n\t\t\t\treturn 0;\n\t\t}} else {{\n\t\t\treturn 0;\n\t\t}}''',
     "session1 GET_REPORT",
 )
-# Session0 M21 GET_REPORT still accepts 08/09 only; broaden it and select the
-# coherent side builder while preserving report05 behavior.
 mode = regex_once(
     mode,
     r'''\}\s*else\s+if\s*\(reportId\s*==\s*0x05\)\s*\{\s*sw2Build05\(\(uint8_t\)bond,\s*p\);\s*\}\s*else\s+if\s*\(reportId\s*==\s*0x08\s*\|\|\s*reportId\s*==\s*0x09\)\s*\{\s*uint8_t\s+rid\s*=\s*reportId;\s*if\s*\(!f27JoyconBuildNative\(\(uint8_t\)bond,\s*g_sw2Features,\s*&rid,\s*p\)\)\s*return\s+0;\s*\}\s*else\s*\{\s*return\s+0;\s*\}''',
