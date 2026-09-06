@@ -1,0 +1,195 @@
+name: F27 M27 R390 one silent Adafruit JCL
+
+on:
+  push:
+    branches:
+      - f27-m27-r390-one-silent-jcl
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Reconstruct and prove accepted r384 baseline
+        run: |
+          set -eu
+          bash tools/f27_m29_ci_v3.sh R-L r384
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/r384-mode.cpp
+          cp OpenPuck/f27_joycon2.cpp /tmp/r384-joy.cpp
+          cp OpenPuck/f27_joycon2.h /tmp/r384-joy.h
+          cp OpenPuck/OpenPuck.ino /tmp/r384-ino
+          cp OpenPuck/config.cpp /tmp/r384-config
+          cp OpenPuck/bonds.cpp /tmp/r384-bonds
+          cp Makefile /tmp/r384-Makefile
+
+      - name: Apply M33 one silent JCL discriminator
+        run: |
+          set -eu
+          python3 tools/f27_m33_one_silent_jcl.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+
+      - name: Prove r390 scope and silence
+        run: |
+          set -eu
+          grep -q 'F27-M33-ONE-SILENT-JCL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M33_JCL_HID_DESC\[100\]' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'static Adafruit_USBD_HID g_m33SilentJcl' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m33SilentJcl.enableOutEndpoint(true)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m33SilentJcl.setReportDescriptor' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m33SilentJcl.setPollInterval(4)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m33SilentJcl.begin()' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'USBDevice.addInterface(g_m33SilentJcl)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'itf->bInterfaceNumber >= 5' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m33SilentJcl.ready()' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'for (uint8_t s = 0; s < 1; s++)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M27-M33-ONE-SILENT-JCL-r390-raw' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M27_TRACE_RAW_MAGIC = 0x30334D53UL' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'usbTxHid(&g_m33SilentJcl' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'g_m33SilentJcl.sendReport' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'tud_hid_n_report(1' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'M27_TRACE_FILE' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'M27_TRACE_TAG' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'Adafruit_LittleFS' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'InternalFileSystem' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch2_pro.cpp
+          cmp -s /tmp/r384-joy.cpp OpenPuck/f27_joycon2.cpp || { echo 'M33 changed frozen Joy-Con builder module'; exit 1; }
+          cmp -s /tmp/r384-joy.h OpenPuck/f27_joycon2.h || { echo 'M33 changed Joy-Con header'; exit 1; }
+          cmp -s /tmp/r384-ino OpenPuck/OpenPuck.ino || { echo 'M33 changed OpenPuck.ino'; exit 1; }
+          cmp -s /tmp/r384-config OpenPuck/config.cpp || { echo 'M33 changed config.cpp'; exit 1; }
+          cmp -s /tmp/r384-bonds OpenPuck/bonds.cpp || { echo 'M33 changed bonds.cpp'; exit 1; }
+          cmp -s /tmp/r384-Makefile Makefile || { echo 'M33 changed Makefile'; exit 1; }
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          before=Path('/tmp/r384-mode.cpp').read_text()
+          after=Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          def compact(s): return re.sub(r'\s+', '', s)
+          def arr(src,name):
+              m=re.search(r'static const uint8_t '+re.escape(name)+r'\[[^\]]*\] = \{.*?\n\};',src,re.S)
+              if not m: raise SystemExit('missing array '+name)
+              return compact(m.group(0))
+          for name in ('SWITCH2_PRO_HID_DESC','SWITCH2_PRO_CFG_BODY','SW2_VENDOR_IDENTITY','SW2_VENDOR_PROTOCOL','M28G_CHARGING_GRIP_FACTORY'):
+              if arr(before,name) != arr(after,name):
+                  raise SystemExit('M33 changed frozen r384 transport/grip array '+name)
+          def klass(src):
+              m=re.search(r'class Switch2ProUsbInterface : public Adafruit_USBD_Interface \{.*?\n\};\nstatic Switch2ProUsbInterface g_sw2Usb\[M15_SW2_SESSION_COUNT\]',src,re.S)
+              if not m: raise SystemExit('missing Switch2ProUsbInterface class')
+              return compact(m.group(0))
+          if klass(before) != klass(after):
+              raise SystemExit('M33 changed frozen M27 custom interface class')
+          if after.count('USBDevice.addInterface(g_sw2Usb[M15_SW2_PRO]);') != 1:
+              raise SystemExit('session0 custom mount not unique')
+          if 'USBDevice.addInterface(g_sw2Usb[M15_SW2_JOYCON_R]);' in after:
+              raise SystemExit('old full Nintendo session1 still mounted')
+          ds=after.index('static void sw2Drain(void)')
+          de=after.index('\nbool switch2ProVendorControlXfer', ds)
+          drain=after[ds:de]
+          if drain.count('tud_hid_n_report(') != 1 or 'tud_hid_n_report(s,' not in drain:
+              raise SystemExit('unexpected periodic report submit topology')
+          if 'usbTxHid(' in drain or 'sendReport(' in drain:
+              raise SystemExit('silent sibling gained a transmit path')
+          print('M33 one-silent-JCL scope/provenance PASS')
+          PY
+
+      - name: Build Makerdiary r390
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M33-R390-SILENTJCL-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-M33-R390-OneSilentJCL-MDK.uf2
+
+      - name: Validate UF2 and raw-page separation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-M33-R390-OneSilentJCL-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; lo=0xffffffff; hi=0
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              if total is None: total=nblocks; fam=family
+              if nblocks!=total or family!=fam: raise SystemExit('metadata mismatch')
+              seen.append(no); lo=min(lo,addr); hi=max(hi,addr+size)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          if fam != 0xADA52840: raise SystemExit('wrong family')
+          if hi > 0xEB000: raise SystemExit(f'UF2 reaches raw trace page: {hi:#x}')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'F27-M33-R390-SILENTJCL-'+short,'build marker'),
+              (b'F27-M33-ONE-SILENT-JCL','M33 marker'),
+              (b'F27-M27-PROVEN-SESSION1-LEFT-JCR','M27 authority'),
+              (b'F27-M28G-GRIP-CONTEXT','M28G authority'),
+              (b'F27-M29-JCR-JCL-PAIR','M29 authority'),
+              (b'M27-M33-ONE-SILENT-JCL-r390-raw','trace source'),
+              (b'# JT begin','JT dump'),
+          ]:
+              if needle not in image: raise SystemExit('missing '+label)
+          for bad in (b'/jc2trace',b'/jc2mode'):
+              if bad in image: raise SystemExit('forbidden persistence path '+repr(bad))
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data),'range',hex(lo)+'..'+hex(hi))
+          PY
+
+      - name: Record manifest
+        run: |
+          cat > build/mdk/F27-M33-R390-OneSilentJCL.manifest.txt <<EOF
+          source_commit=${GITHUB_SHA}
+          base_hardware_authority=r384 54ed85fdda92faeafcf58e7c4a9da94a7af5b915
+          r389_result=HID0+HID1 host-ready but no controller surfaced; live sibling traffic confounded descriptor-presence question
+          physical_usb_shell=exact M27/r384 session0 Nintendo bootstrap + exactly one standard Adafruit JCL HID sibling
+          hid0=JCR A native 0x08; proven M27/r384 custom path; only device-to-host report sender
+          hid1=JCL A descriptor 0x07 via real Adafruit_USBD_HID; host-readiness observed; absolutely no HID1 IN reports sent
+          old_session1=not mounted
+          vendor_sessions=1 exact session0 Nintendo vendor session; no fabricated sibling vendor session
+          purpose=distinguish whether r389 admission failure is caused by presence of a second Joy-Con HID descriptor or by live JCL IN traffic
+          expected_if_jcr_returns=descriptor presence tolerated; next rung gates first JCL TX after session0 admission
+          expected_if_no_controller=second Joy-Con HID descriptor/interface presence itself poisons Nintendo admission in this topology
+          trace=raw page 0xEB000 magic 0x30334D53; inherited session0 trace plus HID1 readiness-only I event; no experimental filesystem writes
+          joycon1_authority=NONE
+          hardware_status=PENDING
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-M33-R390-OneSilentJCL-MDK.uf2 >> build/mdk/F27-M33-R390-OneSilentJCL.manifest.txt
+
+      - name: Upload r390
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M33-R390-OneSilentJCL
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-M33-R390-OneSilentJCL-MDK.uf2
+            build/mdk/F27-M33-R390-OneSilentJCL.manifest.txt
