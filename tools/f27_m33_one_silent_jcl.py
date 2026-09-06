@@ -166,7 +166,7 @@ static void m33TraceSilentJclReady()
 	r.d = 0x07;
 	r.e = 1;
 	r.f = 0;
-	m27TracePushPending(r);
+	m27TraceQueue(r);
 }
 
 '''
