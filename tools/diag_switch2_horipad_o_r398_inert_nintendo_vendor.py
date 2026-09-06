@@ -34,6 +34,16 @@ s = repl(
     "custom-driver include",
 )
 
+# mountSlots() precedes the r396 trace block. Keep the actual vendor object after
+# those trace helpers (so driver-open can trace) and expose only a narrow helper
+# declaration before mountSlots() to avoid C++ declaration-order coupling.
+s = repl(
+    s,
+    "void SwitchHoriController::mountSlots(uint8_t k)\n{",
+    "static void h4AddNintendoVendorInterface();\n\nvoid SwitchHoriController::mountSlots(uint8_t k)\n{",
+    "vendor add helper declaration",
+)
+
 vendor_block = r'''
 // r398 admission-threshold probe: preserve the exact r396 HORIPAD O HID
 // personality and append only one inert Nintendo/Pro2-shaped vendor function.
@@ -78,6 +88,11 @@ class H4NintendoVendorInterface : public Adafruit_USBD_Interface {
 	}
 };
 static H4NintendoVendorInterface g_h4NintendoVendor;
+
+static void h4AddNintendoVendorInterface()
+{
+	USBDevice.addInterface(g_h4NintendoVendor);
+}
 
 static void h4VendorDriverInit()
 {
@@ -211,7 +226,7 @@ new_dump = '''\tfor (uint32_t i = 0; i < count; i++) {\n\t\tif (r[i].phase == 4 
 s = repl(s, old_dump, new_dump, "trace dump")
 
 old_mount = '''void SwitchHoriController::mountSlots(uint8_t k)\n{\n\t(void)k;\n\tfor (uint8_t u = 0; u < maxSlots(); u++)\n\t\tUSBDevice.addInterface(g_switch[u]);\n}\n'''
-new_mount = '''void SwitchHoriController::mountSlots(uint8_t k)\n{\n\t(void)k;\n\tfor (uint8_t u = 0; u < maxSlots(); u++)\n\t\tUSBDevice.addInterface(g_switch[u]);\n\tUSBDevice.addInterface(g_h4NintendoVendor);\n}\n'''
+new_mount = '''void SwitchHoriController::mountSlots(uint8_t k)\n{\n\t(void)k;\n\tfor (uint8_t u = 0; u < maxSlots(); u++)\n\t\tUSBDevice.addInterface(g_switch[u]);\n\th4AddNintendoVendorInterface();\n}\n'''
 s = repl(s, old_mount, new_mount, "append inert vendor interface")
 CPP.write_text(s, encoding="utf-8")
 
