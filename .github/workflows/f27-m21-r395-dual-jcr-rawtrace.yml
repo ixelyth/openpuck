@@ -1,0 +1,173 @@
+name: F27 M21 r395 dual-JCR raw JT replay
+
+on:
+  push:
+    branches: [f27-m21-r395-dual-jcr-rawtrace]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify frozen M21 authority and branch scope
+        run: |
+          set -eu
+          BASE=2f990e0f3e9401a734427e23e8223f2b9f1be799
+          test "$(git merge-base HEAD "$BASE")" = "$BASE"
+          git diff --name-only "$BASE"..HEAD | sort > /tmp/branch-files
+          cat /tmp/branch-files
+          test "$(wc -l < /tmp/branch-files)" -eq 2
+          grep -qx '.github/workflows/f27-m21-r395-dual-jcr-rawtrace.yml' /tmp/branch-files
+          grep -qx 'tools/f27_m21_r395_rawtrace.py' /tmp/branch-files
+
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Compose current Makerdiary support and recover pinned M21 inputs
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c \
+            b6bce4d387433372f480593bd28de506ff0b5368 \
+            1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          mkdir -p tools/f27_m15_parts
+          git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_switch2pro_m15.py > tools/f27_switch2pro_m15.py
+          for n in 00 01 02 03 04 05 06 07; do
+            git show b6bce4d387433372f480593bd28de506ff0b5368:tools/f27_m15_parts/part${n}.pyfrag > tools/f27_m15_parts/part${n}.pyfrag
+          done
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.cpp > OpenPuck/f27_joycon2.cpp
+          git show 1fecb47401ed9fb7bdb22b8c6fe4707575411250:OpenPuck/f27_joycon2.h > OpenPuck/f27_joycon2.h
+
+      - name: Reconstruct exact M21 then add r395 observer
+        run: |
+          set -eu
+          python3 tools/f27_switch2pro_m15.py
+          python3 tools/f27_switch2pro_m21.py
+          cp OpenPuck/mode_switch2_pro.cpp /tmp/m21-before-trace.cpp
+          python3 tools/f27_m21_r395_rawtrace.py
+          make format
+          make check
+          git add -N OpenPuck/f27_joycon2.cpp OpenPuck/f27_joycon2.h
+          git diff --check
+
+      - name: Prove M21 topology and trace-only scope
+        run: |
+          set -eu
+          grep -q 'F27-M15-DUAL-S2-TOPOLOGY' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'F27-M21-DUAL-JCR-TOPOLOGY' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M15_SW2_SESSION_COUNT = 2' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_sw2Sessions\[s\].activeReport = 0x08' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'out\[5\] \^= 0x01u' OpenPuck/mode_switch2_pro.cpp
+          grep -q "block\[serialTail - address\] = '1'" OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M21T_TRACE_PAGE = 0x000EB000UL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M21T_TRACE_MAGIC = 0x5431324DUL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'source=M21-DualJCR-r395-raw' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm21tVendorRx(s, g_sw2VendorOut' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm21tOpened(s, 1, true, ifnum' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'switch2ProM21TraceDump' OpenPuck/serial_console.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch2_pro.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          before=Path('/tmp/m21-before-trace.cpp').read_text()
+          after=Path('OpenPuck/mode_switch2_pro.cpp').read_text()
+          anchors=[
+              'M15_SW2_SESSION_COUNT = 2',
+              'static M15Sw2Session g_sw2Sessions[M15_SW2_SESSION_COUNT]',
+              'static Switch2ProUsbInterface g_sw2Usb[M15_SW2_SESSION_COUNT]',
+              'uint8_t s = (uint8_t)(ifnum / 5u);',
+              'g_sw2Sessions[s].activeReport = 0x08;',
+              'out[5] ^= 0x01u;',
+          ]
+          for x in anchors:
+              if x not in before or x not in after:
+                  raise SystemExit('M21 topology anchor changed/missing: '+x)
+          print('r395 trace-scope anchors PASS')
+          PY
+
+      - name: Generate diagnostic version
+        run: |
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M21-R395-JT-${short}" ./gen_version.sh
+
+      - name: Build Makerdiary MDK target
+        run: make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+
+      - name: Generate UF2
+        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-M21-R395-DualJCR-RawTrace-MDK.uf2
+
+      - name: Validate UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct,hashlib
+          p=Path('build/mdk/OpenPuck-F27-M21-R395-DualJCR-RawTrace-MDK.uf2')
+          d=p.read_bytes(); lo=0xffffffff; hi=0; fam=None; total=None; nums=[]; image=bytearray()
+          if len(d)%512: raise SystemExit('bad UF2 length')
+          for o in range(0,len(d),512):
+              b=d[o:o+512]
+              m0,m1,flags,a,n,no,nb,f=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
+              fam=f if fam is None else fam; total=nb if total is None else total
+              if f!=fam or nb!=total: raise SystemExit('metadata mismatch')
+              nums.append(no); lo=min(lo,a); hi=max(hi,a+n)
+              if a>=0x26000: image += b[32:32+n]
+          if nums!=list(range(total)) or fam!=0xADA52840: raise SystemExit('UF2 metadata failure')
+          if hi>0xEB000: raise SystemExit('image reaches raw trace page')
+          if b'F27-M21-DUAL-JCR-TOPOLOGY' not in image: raise SystemExit('missing M21 marker')
+          if b'F27-M21-R395-JT-' not in image: raise SystemExit('missing r395 build marker')
+          print('sha256',hashlib.sha256(d).hexdigest()); print('bytes',len(d),'blocks',total,'range',hex(lo)+'..'+hex(hi))
+          PY
+
+      - name: Write manifest
+        run: |
+          cat > build/mdk/F27-M21-R395-DualJCR-RawTrace.manifest.txt <<EOF
+          purpose=trace-only replay of hardware-tested M21 dual complete Joy-Con2-R sessions
+          frozen_m21_authority=2f990e0f3e9401a734427e23e8223f2b9f1be799
+          m15_dual_session_scaffold=b6bce4d387433372f480593bd28de506ff0b5368
+          historical_m3_helpers=1fecb47401ed9fb7bdb22b8c6fe4707575411250
+          makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          source_commit=${GITHUB_SHA}
+          topology=session0 JCR PID2066/report08 live; session1 JCR PID2066/report08 neutral
+          session_isolation=distinct HID endpoints, vendor bulk endpoints, vendor state, counters, controller address, factory serial tail
+          shared_EP0=one physical 057E:2069 USB address with logical Joy-Con identity patch
+          prior_hardware_result=one Joy-Con-R only; live session input and right-trackpad mouse worked
+          trace=raw 0xEB000 magic 0x5431324D; O=open R=ready Q=queued V=vendor-rx
+          trace_commands=JT dump; JC clear
+          filesystem_trace_writes=none
+          hardware_status=PENDING_REPLAY
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-M21-R395-DualJCR-RawTrace-MDK.uf2 >> build/mdk/F27-M21-R395-DualJCR-RawTrace.manifest.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M21-R395-DualJCR-RawTrace
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-M21-R395-DualJCR-RawTrace-MDK.uf2
+            build/mdk/F27-M21-R395-DualJCR-RawTrace.manifest.txt
