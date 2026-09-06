@@ -1,0 +1,50 @@
+name: F27 M27 R385 JCL-JCR pair
+
+on:
+  push:
+    branches:
+      - f27-m27-r385-jcl-jcr-pair
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Compose validate and build r385 JCL-JCR
+        run: bash tools/f27_m29_ci_v3.sh L-R r385
+
+      - name: Upload r385 JCL-JCR
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M29-R385-JCL-JCR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/${{ env.OUT_BASE }}.uf2
+            ${{ env.MANIFEST }}
