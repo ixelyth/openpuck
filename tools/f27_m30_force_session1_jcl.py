@@ -3,8 +3,8 @@
 
 Session 0 remains the accepted JCR path. Whenever session0 Nintendo state changes,
 mirror only input/report/feature state into session1 while retaining JCL report 0x07.
-The existing dual-session drain then attempts the second HID stream without requiring
-Nintendo vendor initialization on session1.
+The accepted r384 drain control flow is preserved; only its TinyUSB readiness/report
+calls are wrapped to persist first session1 endpoint/TX observations.
 """
 from pathlib import Path
 import re
@@ -52,7 +52,7 @@ src = replace_once(
 
 helper = r'''
 // r386 discriminator: session1 is deliberately not given synthetic Nintendo
-// vendor traffic. It only inherits the state that gates native HID streaming.
+// vendor traffic. It only inherits state that gates native HID streaming.
 static void m30MirrorSession0ToJcl(void)
 {
 	M15Sw2Session &src = g_sw2Sessions[M15_SW2_PRO];
@@ -63,19 +63,38 @@ static void m30MirrorSession0ToJcl(void)
 	dst.activeReport = src.activeReport == 0x05 ? 0x05 : 0x07;
 }
 
-// Defined by the post-observer transform so first session1 readiness/TX events
-// are persisted in the isolated JT raw snapshot rather than only kept in RAM.
+// Defined by the post-observer transform so these one-shot events persist in JT.
 static void m30TraceSession1Event(uint8_t phase, bool ready, uint8_t rid);
+
+static bool m30HidReady(uint8_t session, uint8_t instance)
+{
+	bool ready = tud_hid_n_ready(instance);
+	if (session == M15_SW2_JOYCON_R)
+		m30TraceSession1Event(ready ? 2 : 1, ready,
+					g_sw2Sessions[session].activeReport);
+	return ready;
+}
+
+static bool m30HidReport(uint8_t session, uint8_t instance, uint8_t rid,
+			 uint8_t const *report, uint16_t len)
+{
+	if (session == M15_SW2_JOYCON_R)
+		m30TraceSession1Event(3, true, rid);
+	bool queued = tud_hid_n_report(instance, rid, report, len);
+	if (session == M15_SW2_JOYCON_R && queued)
+		m30TraceSession1Event(4, true, rid);
+	return queued;
+}
 
 '''
 src = replace_once(
     src,
     "static void sw2BuildVendorReply(void)",
     helper + "static void sw2BuildVendorReply(void)",
-    "mirror helper",
+    "mirror/helper insertion",
 )
 
-# Mirror state after the command handler has applied session0 input/report/features.
+# Mirror state after a session0 Nintendo bulk handler updates gating/features.
 src = regex_once(
     src,
     r'(\n\s*uint8_t first = replyLen > sizeof g_sw2VendorReply \?)',
@@ -83,23 +102,21 @@ src = regex_once(
     "post-command mirror",
 )
 
-# Split the readiness gate so JT can prove whether HID instance 1 ever became ready.
-# M15-derived revisions may spell the TinyUSB instance as `s` or as the stored
-# per-session hidInstance; preserve whichever expression the accepted baseline uses.
-src = regex_once(
-    src,
-    r'if\s*\(\s*!g_sw2InputEnabled\s*\|\|\s*!tud_hid_n_ready\(([^)]+)\)\s*\)\s*\n\s*continue;',
-    '''if (!g_sw2InputEnabled)\n\t\t\tcontinue;\n\t\tbool hidReady = tud_hid_n_ready(\1);\n\t\tif (s == M15_SW2_JOYCON_R)\n\t\t\tm30TraceSession1Event(hidReady ? 2 : 1, hidReady, g_sw2ActiveReport);\n\t\tif (!hidReady)\n\t\t\tcontinue;''',
-    "session1 readiness observation",
-)
+# Preserve the accepted drain logic: wrap only its one readiness call.
+ready_calls = list(re.finditer(r'tud_hid_n_ready\(([^)]+)\)', src))
+if len(ready_calls) != 1:
+    raise SystemExit(f"M30 expected one tud_hid_n_ready call, found {len(ready_calls)}")nm = ready_calls[0]
+src = src[:m.start()] + f"m30HidReady(s, {m.group(1)})" + src[m.end():]
 
-# Record first actual attempt and first successful queue without altering payload.
-src = regex_once(
-    src,
-    r'if\s*\(tud_hid_n_report\(([^,]+),\s*rid,\s*p,\s*sizeof p\)\)\s*\n\s*g_sw2LastReportMs\s*=\s*millis\(\);',
-    '''bool queued = tud_hid_n_report(\1, rid, p, sizeof p);\n\t\tif (s == M15_SW2_JOYCON_R) {\n\t\t\tm30TraceSession1Event(3, true, rid);\n\t\t\tif (queued)\n\t\t\t\tm30TraceSession1Event(4, true, rid);\n\t\t}\n\t\tif (queued)\n\t\t\tg_sw2LastReportMs = millis();''',
-    "session1 transmit observation",
-)
+# Likewise wrap only the native periodic report submission call.
+report_matches = list(re.finditer(
+    r'tud_hid_n_report\(([^,]+),\s*rid,\s*p,\s*sizeof p\)', src))
+if len(report_matches) != 1:
+    raise SystemExit(f"M30 expected one periodic tud_hid_n_report call, found {len(report_matches)}")
+m = report_matches[0]
+src = (src[:m.start()] +
+       f"m30HidReport(s, {m.group(1).strip()}, rid, p, sizeof p)" +
+       src[m.end():])
 
 MODE.write_text(src, encoding="utf-8")
 print("F27-M30 r386 forced session1 JCL discriminator applied")
