@@ -1,0 +1,245 @@
+name: R399 HORIPAD O FourSelect + first Nintendo identity reply
+
+on:
+  push:
+    branches:
+      - diag-switch2-horipad-o-r399-first-identity
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out r399 diagnostic branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact r398 authority and narrow branch delta
+        run: |
+          set -eu
+          R398=3d1f47064ed6070fd0e4bbbe7de6ea16ddcfc762
+          R396=9256beb9c527104542f64e69a1af5647e47f773e
+          test "$(git merge-base HEAD "$R398")" = "$R398"
+          test "$(git diff --name-only "$R398"...HEAD | grep -Ev '^(\.github/workflows/diag-switch2-horipad-o-r399-first-identity\.yml|tools/diag_switch2_horipad_o_r399_first_identity\.py)$' || true)" = ""
+          git show "$R398:tools/diag_switch2_horipad_o_r398_inert_nintendo_vendor.py" > /tmp/r398-transform.py
+          cmp -s /tmp/r398-transform.py tools/diag_switch2_horipad_o_r398_inert_nintendo_vendor.py
+          git show "$R396:tools/diag_switch2_horipad_o_fourselect_r396_trace.py" > /tmp/r396-trace.py
+          cmp -s /tmp/r396-trace.py tools/diag_switch2_horipad_o_fourselect_r396_trace.py
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Apply exact historical Makerdiary patch
+        run: |
+          set -eu
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          orig="$(git show "$MDK" --pretty=format: | git patch-id --stable | awk '{print $1}')"
+          applied="$(git diff --cached | git patch-id --stable | awk '{print $1}')"
+          test -n "$orig"
+          test "$orig" = "$applied"
+          git diff --cached --check
+
+      - name: Reconstruct exact r398 runtime
+        run: |
+          set -eu
+          python3 tools/diag_switch2_horipad_o_fourselect.py
+          python3 tools/diag_switch2_horipad_o_fourselect_r396_trace.py
+          python3 tools/diag_switch2_horipad_o_r398_inert_nintendo_vendor.py
+          git diff --check
+          grep -q 'USBDevice.setID(0x0F0D, 0x0202)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'sizeof SWITCH_HID_DESC == 123' OpenPuck/mode_switch_hori.cpp
+          grep -q 'H4_TRACE_MAGIC = 0x38393448UL' OpenPuck/mode_switch_hori.cpp
+          grep -q 'source=Switch2-HORIPAD-O-FourSelect-r398-inertvendor' OpenPuck/mode_switch_hori.cpp
+          grep -q 'Switch 2 Pro Controller' OpenPuck/mode_switch_hori.cpp
+          cp OpenPuck/mode_switch_hori.cpp /tmp/r398-mode_switch_hori.cpp
+          cp OpenPuck/webusb_config.cpp /tmp/r398-webusb_config.cpp
+          cp OpenPuck/usb_app_drivers.cpp /tmp/r398-usb_app_drivers.cpp
+          cp OpenPuck/usb_app_drivers.h /tmp/r398-usb_app_drivers.h
+          cp OpenPuck/usb_tx.cpp /tmp/r398-usb_tx.cpp
+          cp OpenPuck/OpenPuck.ino /tmp/r398-OpenPuck.ino
+          cp OpenPuck/bonds.cpp /tmp/r398-bonds.cpp
+          cp OpenPuck/config.cpp /tmp/r398-config.cpp
+          cp Makefile /tmp/r398-Makefile
+
+      - name: Add only first Nintendo C0/03 identity reply
+        run: |
+          set -eu
+          python3 tools/diag_switch2_horipad_o_r399_first_identity.py
+          git diff --check
+
+      - name: Prove r399 admission-threshold scope
+        run: |
+          set -eu
+          grep -q 'USBDevice.setID(0x0F0D, 0x0202)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'USBDevice.setProductDescriptor("HORIPAD O")' OpenPuck/mode_switch_hori.cpp
+          grep -q 'sizeof SWITCH_HID_DESC == 123' OpenPuck/mode_switch_hori.cpp
+          grep -q 'usbTxHid(&g_switch\[u\], 0, p, 8)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'USBDevice.addInterface(g_h4NintendoVendor)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'H4_R399_PRO2_IDENTITY\[64\]' OpenPuck/mode_switch_hori.cpp
+          grep -q 'request->bmRequestType == 0xc0' OpenPuck/mode_switch_hori.cpp
+          grep -q 'request->bRequest == 0x03' OpenPuck/mode_switch_hori.cpp
+          grep -q 'H4_TRACE_MAGIC = 0x39393448UL' OpenPuck/mode_switch_hori.cpp
+          grep -q 'source=Switch2-HORIPAD-O-FourSelect-r399-firstidentity' OpenPuck/mode_switch_hori.cpp
+          grep -q 'g_usbMode == MODE_SW_HORI' OpenPuck/webusb_config.cpp
+          grep -q 'switchHoriFirstIdentityControlXfer' OpenPuck/webusb_config.cpp
+          ! grep -q 'SW2_VENDOR_PROTOCOL' OpenPuck/mode_switch_hori.cpp
+          ! grep -q 'g_sw2Features' OpenPuck/mode_switch_hori.cpp
+          ! grep -q 'g_sw2ActiveReport' OpenPuck/mode_switch_hori.cpp
+          ! grep -q 'sw2HandlePairing' OpenPuck/mode_switch_hori.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch_hori.cpp
+          ! grep -q 'LittleFS' OpenPuck/mode_switch_hori.cpp
+          cmp -s /tmp/r398-usb_app_drivers.cpp OpenPuck/usb_app_drivers.cpp || { echo 'r399 changed usb_app_drivers.cpp'; exit 1; }
+          cmp -s /tmp/r398-usb_app_drivers.h OpenPuck/usb_app_drivers.h || { echo 'r399 changed usb_app_drivers.h'; exit 1; }
+          cmp -s /tmp/r398-usb_tx.cpp OpenPuck/usb_tx.cpp || { echo 'r399 changed usb_tx.cpp'; exit 1; }
+          cmp -s /tmp/r398-OpenPuck.ino OpenPuck/OpenPuck.ino || { echo 'r399 changed OpenPuck.ino'; exit 1; }
+          cmp -s /tmp/r398-bonds.cpp OpenPuck/bonds.cpp || { echo 'r399 changed bonds.cpp'; exit 1; }
+          cmp -s /tmp/r398-config.cpp OpenPuck/config.cpp || { echo 'r399 changed config.cpp'; exit 1; }
+          cmp -s /tmp/r398-Makefile Makefile || { echo 'r399 changed Makefile'; exit 1; }
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          before = Path('/tmp/r398-mode_switch_hori.cpp').read_text()
+          after = Path('OpenPuck/mode_switch_hori.cpp').read_text()
+          def block(s, begin, end):
+              a = s.index(begin)
+              b = s.index(end, a)
+              return s[a:b]
+          for begin,end,label in (
+              ('static const uint8_t SWITCH_HID_DESC[] = {', 'static_assert(sizeof SWITCH_HID_DESC == 123', 'HORIPAD descriptor'),
+              ('static void switchBuildHoripad(', 'void SwitchHoriController::begin()', 'HORIPAD report builder'),
+              ('void SwitchHoriController::task()', '\n}', 'FourSelect task'),
+              ('class H4NintendoVendorInterface', 'static H4NintendoVendorInterface g_h4NintendoVendor;', 'r398 vendor descriptor'),
+          ):
+              if block(before, begin, end) != block(after, begin, end):
+                  raise SystemExit('r399 changed frozen ' + label)
+          ident = re.search(r'H4_R399_PRO2_IDENTITY\[64\] = \{(.*?)\n\};', after, re.S)
+          if not ident:
+              raise SystemExit('r399 identity block missing')
+          toks = re.findall(r"0x[0-9A-Fa-f]+|'[^']'", ident.group(1))
+          if len(toks) != 64:
+              raise SystemExit(f'r399 identity token count {len(toks)} != 64')
+          if '0x7e, 0x05, 0x69, 0x20' not in ident.group(1):
+              raise SystemExit('r399 identity lost captured Nintendo 057E:2069 bytes')
+          print('frozen r398 HORIPAD/report/vendor topology retained; only first C0/03 response layer added')
+          PY
+
+      - name: Generate r399 build provenance
+        run: |
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="SW2HORI-R399-C003-${short}" ./gen_version.sh
+
+      - name: Build standard target
+        run: |
+          mkdir -p build/r399-standard build/cache/r399-standard
+          make build BUILD_PATH=build/cache/r399-standard OUTPUT_DIR=build/r399-standard
+
+      - name: Build Makerdiary MDK target
+        run: make build-mdk
+
+      - name: Generate r399 MDK UF2
+        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Switch2-HORIPAD-O-R399-FirstIdentity-MDK.uf2
+
+      - name: Validate UF2 and diagnostic markers
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os, struct
+          p = Path('build/mdk/OpenPuck-Switch2-HORIPAD-O-R399-FirstIdentity-MDK.uf2')
+          data = p.read_bytes()
+          if len(data) % 512:
+              raise SystemExit('non-UF2 length')
+          total = family = None
+          seen = []
+          image = bytearray()
+          lo = 0xffffffff
+          hi = 0
+          for off in range(0, len(data), 512):
+              b = data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,fam = struct.unpack_from('<IIIIIIII', b, 0)
+              if (m0,m1) != (0x0A324655,0x9E5D5157):
+                  raise SystemExit('bad UF2 magic')
+              total = nblocks if total is None else total
+              family = fam if family is None else family
+              if nblocks != total or fam != family:
+                  raise SystemExit('inconsistent UF2 metadata')
+              seen.append(no)
+              lo = min(lo, addr)
+              hi = max(hi, addr + size)
+              image += b[32:32+size]
+          if seen != list(range(total)):
+              raise SystemExit('non-sequential UF2 blocks')
+          if family != 0xADA52840:
+              raise SystemExit('wrong UF2 family')
+          if hi > 0xEB000:
+              raise SystemExit(f'UF2 reaches trace page: {hi:#x}')
+          short = os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in (
+              (b'SW2HORI-R399-C003-' + short, 'build marker'),
+              (b'HORIPAD O', 'HORIPAD O identity'),
+              (b'Switch 2 Pro Controller', 'r398 vendor interface string'),
+              (b'HEW70006169780', 'captured first Nintendo identity'),
+              (b'Switch2-HORIPAD-O-FourSelect-r399-firstidentity', 'trace source'),
+              (b'# JT begin', 'JT dump'),
+          ):
+              if needle not in image:
+                  raise SystemExit('missing ' + label)
+          print('sha256', hashlib.sha256(data).hexdigest())
+          print('blocks', total, 'family', hex(family), 'bytes', len(data), 'range', hex(lo)+'..'+hex(hi))
+          PY
+
+      - name: Record r399 manifest
+        run: |
+          cat > build/mdk/Switch2-HORIPAD-O-R399-FirstIdentity.manifest.txt <<EOF
+          purpose=first active Nintendo admission-threshold probe over hardware-positive r398
+          source_commit=${GITHUB_SHA}
+          r398_authority=3d1f47064ed6070fd0e4bbbe7de6ea16ddcfc762
+          r398_hardware=PASS four controllers individually controllable; vendor interface opened
+          r398_trace=JC2-Trace-20260906-164751.txt
+          r396_authority=9256beb9c527104542f64e69a1af5647e47f773e
+          runtime_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          historical_mdk_patch=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          identity=0F0D:0202 HORI CO.,LTD. / HORIPAD O unchanged
+          horipad_descriptor=exact preserved F16/r396 123-byte capture
+          horipad_reports=exact preserved r396/r398 8-byte FourSelect contract
+          vendor_topology=exact preserved r398 inert Pro2-shaped IAD + FF/00/00 bulk OUT/IN
+          added_layer=answer ONLY device-level Nintendo C0/03 identity request with exact accepted Pro2 64-byte identity payload
+          later_control=C0/02 protocol and 40/04 commit remain unanswered/forwarded; all other Nintendo control semantics absent
+          bulk_runtime=observe command id/sub/seq and sink; NO bulk-IN replies, including no 03/0D acknowledgement
+          native_hid=ABSENT; no report 05/09, pairing, features, rumble, gyro or motion additions
+          trace=HID ready/enqueue + vendor-open + control SETUP + bulk RX + C0/03 reply marker; page 0xEB000 magic 0x39393448; JT dump / JC clear
+          experimental_filesystem_writes=NONE
+          hardware_status=PENDING
+          EOF
+          sha256sum build/mdk/OpenPuck-Switch2-HORIPAD-O-R399-FirstIdentity-MDK.uf2 >> build/mdk/Switch2-HORIPAD-O-R399-FirstIdentity.manifest.txt
+
+      - name: Upload r399 diagnostic package
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-Switch2-HORIPAD-O-R399-FirstIdentity
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-Switch2-HORIPAD-O-R399-FirstIdentity-MDK.uf2
+            build/mdk/Switch2-HORIPAD-O-R399-FirstIdentity.manifest.txt
