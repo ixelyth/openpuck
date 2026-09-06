@@ -1,0 +1,152 @@
+name: F27 JC2 R374 init pairing fidelity
+
+on:
+  push:
+    branches:
+      - f27-jc2-r374-init-pairing-fidelity
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Compose full non-clean JCR with current init fidelity
+        run: |
+          set -eu
+          git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          git cherry-pick --no-commit 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          test -z "$(git diff --name-only --diff-filter=U)"
+          python3 tools/f27_g5_integrate.py
+          python3 tools/f27_g5_re_refresh.py
+          python3 tools/f27_jc2_init_fidelity.py
+          python3 tools/f27_jc2_ab_common_fix.py
+          python3 tools/f27_jc2_ab_make_nonclean.py
+          make format
+          make check
+          git diff --check
+
+      - name: Verify corrected JCR contract
+        run: |
+          set -eu
+          grep -q '#define MODE_JOYCON2 13' OpenPuck/config.h
+          grep -q 'JOYCON2(jcr/jcl)' OpenPuck/OpenPuck.ino
+          grep -q 'OPK_JC2_START_ONCE' OpenPuck/OpenPuck.ino
+          grep -q 'OPK_JC2_START_VARIANT' OpenPuck/OpenPuck.ino
+          ! grep -q 'OPK_G5_FORCE_JOYCON2' OpenPuck/OpenPuck.ino
+          ! grep -q 'joyCon2Clean' OpenPuck/OpenPuck.ino
+          grep -q 'if (!puckMode && !keepCdc && !psClean)' OpenPuck/OpenPuck.ino
+          grep -q 'if (!puckMode && !psClean)' OpenPuck/OpenPuck.ino
+          ! grep -q -- '--wrap=tud_descriptor_configuration_cb' Makefile
+          ! grep -q '__wrap_tud_descriptor_configuration_cb' OpenPuck/mode_joycon2.cpp
+          grep -q 'F27-JC2-R374-INIT-PAIRING-FIDELITY' OpenPuck/mode_joycon2.cpp
+          grep -q 'JC2_PAIR_PUBLIC' OpenPuck/mode_joycon2.cpp
+          grep -q 'handlePairing' OpenPuck/mode_joycon2.cpp
+          grep -q 'case 0x15:' OpenPuck/mode_joycon2.cpp
+          grep -q 'jc2PairResponse' OpenPuck/mode_joycon2.cpp
+          grep -q 'replyLen = 9;' OpenPuck/mode_joycon2.cpp
+          grep -q 'replyLen = 32;' OpenPuck/mode_joycon2.cpp
+          grep -q 'replyLen = 37;' OpenPuck/mode_joycon2.cpp
+          grep -q 'out\[2\] = 0x03' OpenPuck/mode_joycon2.cpp
+          grep -q 'out\[3\] = 0x03' OpenPuck/mode_joycon2.cpp
+          grep -q 'out\[4\] = 0x03' OpenPuck/mode_joycon2.cpp
+          grep -q 'ackHeader(reply, 0x08, cmd\[2\], sub)' OpenPuck/mode_joycon2.cpp
+          grep -q '0x01, 0x00, 0x0e, JC2_CONTROLLER_TYPE' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'JOYCON2_VENDOR_PROTOCOL' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'primaryCal' OpenPuck/mode_joycon2.cpp
+          ! grep -q 'Switch 2 Pro Controller' OpenPuck/mode_joycon2.cpp
+          echo 'R374 corrected full JCR contract PASS'
+
+      - name: Build Makerdiary corrected JCR
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-JC2-R374-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_JC2_START_ONCE=1 -DOPK_JC2_START_VARIANT=4 -DOPK_G5_JOYCON_SIDE=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-JC2-R374-InitPairing-JCR-MDK.uf2
+
+      - name: Validate corrected UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, struct, os
+          p=Path('build/mdk/OpenPuck-F27-JC2-R374-InitPairing-JCR-MDK.uf2')
+          data=p.read_bytes(); image=bytearray(); seen=[]; total=None; fam=None; addrs=[]
+          if len(data)%512: raise SystemExit('bad UF2 length')
+          for off in range(0,len(data),512):
+              b=data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,family=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad UF2 magic')
+              total=nblocks if total is None else total
+              fam=family if fam is None else fam
+              if nblocks!=total or family!=fam: raise SystemExit('UF2 metadata mismatch')
+              seen.append(no); addrs.append(addr)
+              if addr>=0x26000: image += b[32:32+size]
+          if seen != list(range(total)): raise SystemExit('nonsequential UF2')
+          short=os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in [
+              (b'F27-JC2-R374-INIT-PAIRING-FIDELITY','init fidelity marker'),
+              (b'Joy-Con 2 (R)','JCR product'),
+              (b'F27-JC2-R374-'+short,'build marker'),
+              (b'JOYCON2(jcr/jcl)','mode-table fix'),
+              (b'HDL50003485519','Charging Grip serial'),
+              (bytes.fromhex('5cf6ee792cdf05e1ba2b6325c41a5f10'),'pairing B1'),
+          ]:
+              if needle not in image: raise SystemExit('missing '+label)
+          if b'Switch 2 Pro Controller' in image: raise SystemExit('Pro2 contamination')
+          print('sha256',hashlib.sha256(data).hexdigest())
+          print('blocks',total,'family',hex(fam),'bytes',len(data),'app_range',hex(min(addrs))+'..'+hex(max(addrs)+256))
+          PY
+
+      - name: Record manifest
+        run: |
+          cat > build/mdk/F27-JC2-R374-InitPairing.manifest.txt <<EOF
+          source_commit=${{ github.sha }}
+          upstream_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
+          endpoint_authority=c711b8c6ce099965995ea6e42e93e2cdce47cb26 plus f27_g5_re_refresh.py
+          protocol_authority=ndeadly/switch2_controller_research@d1c5a7f7ba298f83017fae84952a4e6d2ef8fc92 commands.md + bluetooth_interface.md
+          prior_hardware=R373 A clean and B non-clean both stable enumeration; B WebUSB functional; neither surfaced controller
+          usb_policy=non-clean normal OpenPuck composite; JCR HID/vendor first; wake HID + WebUSB appended
+          common_fix=MODE_NAME index 13 OOB fixed
+          pairing=0x15/01,04,02,03 restored with observed fixed B1 and AES128-ECB challenge response
+          init_fidelity=07/01 trailing byte; 16/01 24-byte payload; 11/01 and 11/03 observed payloads; 13 and 18 observed payloads; battery replies
+          joycon_feature_info=0x03 for IMU/magnetometer/mouse capability fields
+          usb_activation=03/03 and 03/0D retained; 03/0A report select retained
+          charging_grip=0x08 retained
+          switch2pro_source_dependency=NONE
+          hardware_question=does completing observed Joy-Con init/pairing allow the Switch 2 to surface JCR as a controller?
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-JC2-R374-InitPairing-JCR-MDK.uf2 >> build/mdk/F27-JC2-R374-InitPairing.manifest.txt
+
+      - name: Upload corrected JCR
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-JC2-R374-InitPairing-JCR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-JC2-R374-InitPairing-JCR-MDK.uf2
+            build/mdk/F27-JC2-R374-InitPairing.manifest.txt
