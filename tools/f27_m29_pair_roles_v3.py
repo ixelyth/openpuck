@@ -30,13 +30,6 @@ def regex_once(text, pattern, repl, label):
     return out
 
 
-def regex_exact(text, pattern, repl, expected, label):
-    out, n = re.subn(pattern, repl, text, flags=re.S)
-    if n != expected:
-        raise SystemExit(f"F27-M29v3 {label}: regex count {n}, expected {expected}")
-    return out
-
-
 ap = argparse.ArgumentParser()
 ap.add_argument("--session0", choices=("JCR", "JCL"), required=True)
 a = ap.parse_args()
@@ -159,55 +152,47 @@ hdr = regex_once(
     "left declaration",
 )
 
-# One dispatcher makes r384 and r385 identical except m29SessionRight().
-dispatcher = r'''
-static bool m29BuildSessionNative(uint8_t session, uint8_t slot,
-				  uint8_t features, uint8_t *reportId,
-				  uint8_t out[63])
+# Replace only the two known mode-source call-site function names before adding
+# wrappers. This is insensitive to clang-format argument wrapping.
+s1_name_count = mode.count("f27JoyconBuildM27Session1Left")
+if s1_name_count != 2:
+    raise SystemExit(f"F27-M29v3 session1 call-site name count {s1_name_count}, expected 2")
+mode = mode.replace("f27JoyconBuildM27Session1Left", "m29BuildSession1Native")
+
+s0_name_count = mode.count("f27JoyconBuildNative")
+if s0_name_count != 2:
+    raise SystemExit(f"F27-M29v3 session0 call-site name count {s0_name_count}, expected 2")
+mode = mode.replace("f27JoyconBuildNative", "m29BuildSession0Native")
+
+# Wrappers keep the original function signatures, so the surrounding M27 code
+# and argument ordering remain structurally untouched.
+wrappers = r'''
+static bool m29BuildSession0Native(uint8_t slot, uint8_t features,
+				   uint8_t *reportId, uint8_t out[63])
 {
-	if (m29SessionRight(session))
+	if (m29SessionRight(M15_SW2_PRO))
+		return f27JoyconBuildNative(slot, features, reportId, out);
+	return f27JoyconBuildM29Left(slot, features, reportId, out);
+}
+
+static bool m29BuildSession1Native(uint8_t slot, uint8_t features,
+				   uint8_t *reportId, uint8_t out[63])
+{
+	if (m29SessionRight(M15_SW2_JOYCON_R))
 		return f27JoyconBuildNative(slot, features, reportId, out);
 	return f27JoyconBuildM29Left(slot, features, reportId, out);
 }
 '''
-mode = mode.replace(helpers, helpers + dispatcher, 1)
+mode = mode.replace(helpers, helpers + wrappers, 1)
 
-# Redirect exactly the two M27 session1 call sites (periodic + GET_REPORT).
-mode = regex_exact(
-    mode,
-    r'f27JoyconBuildM27Session1Left\(\(uint8_t\)bond,\s*g_sw2Features,\s*&rid,\s*p\)',
-    'm29BuildSessionNative(M15_SW2_JOYCON_R, (uint8_t)bond, g_sw2Features, &rid, p)',
-    2,
-    "session1 dispatcher calls",
-)
-# Redirect exactly the two live session0 native call sites. Dispatcher itself has
-# generic variable names and therefore cannot match this bond-specific pattern.
-mode = regex_exact(
-    mode,
-    r'f27JoyconBuildNative\(\(uint8_t\)bond,\s*g_sw2Features,\s*&rid,\s*p\)',
-    'm29BuildSessionNative(M15_SW2_PRO, (uint8_t)bond, g_sw2Features, &rid, p)',
-    2,
-    "session0 dispatcher calls",
-)
-
-# Both GET_REPORT branches must accept either native Joy-Con report request and
-# then return the side assigned to that session.
-mode = regex_exact(
-    mode,
-    r'reportId\s*==\s*0x08\s*\|\|\s*reportId\s*==\s*0x09',
-    'reportId == 0x07 || reportId == 0x08 || reportId == 0x09',
-    2,
-    "GET_REPORT native acceptance",
-)
-
-# The two drain fallbacks are only defensive, but keep their report IDs coherent.
-mode, fallbacks = re.subn(
-    r'rid\s*=\s*0x08;\s*\n(\s*)sw2BuildJoyconRNeutral',
-    r'rid = m29SessionNativeReport(s);\n\1sw2BuildJoyconRNeutral',
-    mode,
-)
-if fallbacks != 2:
-    raise SystemExit(f"F27-M29v3 drain fallback count {fallbacks}, expected 2")
+# The two GET_REPORT branches historically accept 08/09 because both sessions
+# were JCR. Broaden exactly those two to accept either Joy-Con native report.
+old_condition = "reportId == 0x08 || reportId == 0x09"
+condition_count = mode.count(old_condition)
+if condition_count != 2:
+    raise SystemExit(f"F27-M29v3 GET_REPORT condition count {condition_count}, expected 2")
+mode = mode.replace(old_condition,
+                    "reportId == 0x07 || reportId == 0x08 || reportId == 0x09")
 
 MODE.write_text(mode, encoding="utf-8")
 JOY.write_text(joy, encoding="utf-8")
