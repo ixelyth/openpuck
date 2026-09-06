@@ -36,7 +36,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-format-18
 
-      - name: Compose exact r374 runtime
+      - name: Compose and freeze exact formatted r374 runtime
         run: |
           set -eu
           git fetch origin 96721b9bf50fbb92fc956853b8ef73dcf2ae973c
@@ -47,6 +47,9 @@ jobs:
           python3 tools/f27_jc2_init_fidelity.py
           python3 tools/f27_jc2_ab_common_fix.py
           python3 tools/f27_jc2_ab_make_nonclean.py
+          make format
+          make check
+          git diff --check
           cp OpenPuck/OpenPuck.ino /tmp/r374-OpenPuck.ino
           cp OpenPuck/mode_joycon2.cpp /tmp/r374-mode_joycon2.cpp
           cp OpenPuck/mode_joycon2.h /tmp/r374-mode_joycon2.h
@@ -58,7 +61,7 @@ jobs:
         run: |
           set -eu
           python3 tools/f27_jc2_r379_volatile_start.py
-          make format
+          clang-format-18 -i OpenPuck/OpenPuck.ino
           make check
           git diff --check
 
@@ -91,11 +94,11 @@ jobs:
           ! grep -q 'Adafruit_LittleFS' OpenPuck/mode_joycon2.cpp
           ! grep -q 'NRF_NVMC' OpenPuck/mode_joycon2.cpp
           ! grep -q 'jc2trace' OpenPuck/mode_joycon2.cpp
-          cmp -s /tmp/r374-mode_joycon2.cpp OpenPuck/mode_joycon2.cpp
-          cmp -s /tmp/r374-mode_joycon2.h OpenPuck/mode_joycon2.h
-          cmp -s /tmp/r374-config.cpp OpenPuck/config.cpp
-          cmp -s /tmp/r374-bonds.cpp OpenPuck/bonds.cpp
-          cmp -s /tmp/r374-Makefile Makefile
+          cmp -s /tmp/r374-mode_joycon2.cpp OpenPuck/mode_joycon2.cpp || { echo 'mode_joycon2.cpp drifted'; exit 1; }
+          cmp -s /tmp/r374-mode_joycon2.h OpenPuck/mode_joycon2.h || { echo 'mode_joycon2.h drifted'; exit 1; }
+          cmp -s /tmp/r374-config.cpp OpenPuck/config.cpp || { echo 'config.cpp drifted'; exit 1; }
+          cmp -s /tmp/r374-bonds.cpp OpenPuck/bonds.cpp || { echo 'bonds.cpp drifted'; exit 1; }
+          cmp -s /tmp/r374-Makefile Makefile || { echo 'Makefile drifted'; exit 1; }
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -109,6 +112,9 @@ jobs:
           forbidden=('InternalFS','File ','saveCfg','saveMode','remove(','NRF_NVMC','factoryErase')
           for x in forbidden:
               if x in block: raise SystemExit('volatile block mutates persistent storage: '+x)
+          before=Path('/tmp/r374-OpenPuck.ino').read_text()
+          if '"/jc2mode"' not in before:
+              raise SystemExit('reference r374 startup tag missing')
           print('R379 r374 protocol exact; experimental startup persistence-free PASS')
           PY
 
@@ -163,7 +169,7 @@ jobs:
           source_commit=${{ github.sha }}
           upstream_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
           makerdiary_build_authority=96721b9bf50fbb92fc956853b8ef73dcf2ae973c
-          protocol_runtime=exact r374 composition: G5 integrate + RE refresh + init fidelity + common MODE_NAME fix + non-clean topology
+          protocol_runtime=exact formatted r374 composition: G5 integrate + RE refresh + init fidelity + common MODE_NAME fix + non-clean topology
           experimental_delta=replace /jc2mode filesystem-backed one-shot with RAM-only OPK_JC2_VOLATILE_START
           experimental_persistence=NONE
           trace=NONE
