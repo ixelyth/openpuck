@@ -1,0 +1,105 @@
+name: F27 M27 R392 four JCR Adafruit siblings
+
+on:
+  push:
+    branches: [f27-m27-r392-four-jcr-adafruit]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: {fetch-depth: 0}
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/setup-python@v7
+        with: {python-version: '3.x'}
+      - name: Install build Python packages
+        run: pip install adafruit-nrfutil intelhex
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+      - name: Reconstruct accepted r384 then r389 infrastructure
+        run: |
+          set -eu
+          bash tools/f27_m29_ci_v3.sh R-L r384
+          python3 tools/f27_m32_adafruit_hid_parity.py
+          grep -q 'F27-M32-ADA-HID-PARITY' OpenPuck/mode_switch2_pro.cpp
+      - name: Apply M35 four JCR discriminator
+        run: |
+          set -eu
+          python3 tools/f27_m35_four_jcr.py
+          make format
+          make check
+          git diff --check
+      - name: Prove r392 scope
+        run: |
+          set -eu
+          grep -q 'F27-M35-FOUR-JCR' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'g_m32SiblingHid\[i\].setReportDescriptor(M32_JCR_HID_DESC, 100)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'return 0x08;' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'm29BuildSession0Native' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M27-M35-FOUR-JCR-r392-raw' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M27_TRACE_RAW_MAGIC = 0x32334D52UL' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'USBDevice.addInterface(g_m32SiblingHid\[i\])' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch2_pro.cpp
+          ! grep -q 'M27_TRACE_FILE' OpenPuck/mode_switch2_pro.cpp
+      - name: Build Makerdiary r392
+        run: |
+          set -eu
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="F27-M35-R392-4JCR-${short}" ./gen_version.sh
+          make build-mdk EXTRA_FLAGS="-DOPK_F27_JOYCON_TARGET=2"
+          ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-F27-M35-R392-FOUR-JCR-MDK.uf2
+      - name: Validate UF2
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,struct
+          p=Path('build/mdk/OpenPuck-F27-M35-R392-FOUR-JCR-MDK.uf2'); d=p.read_bytes()
+          lo=0xffffffff; hi=0; fam=None; nums=[]; total=None
+          if len(d)%512: raise SystemExit('bad UF2 length')
+          for o in range(0,len(d),512):
+              b=d[o:o+512]; m0,m1,flags,a,n,no,nb,f=struct.unpack_from('<IIIIIIII',b,0)
+              if (m0,m1)!=(0x0A324655,0x9E5D5157): raise SystemExit('bad magic')
+              if fam is None: fam=f; total=nb
+              if f!=fam or nb!=total: raise SystemExit('metadata mismatch')
+              nums.append(no); lo=min(lo,a); hi=max(hi,a+n)
+          if nums!=list(range(total)) or fam!=0xADA52840: raise SystemExit('UF2 metadata failure')
+          if hi>0xEB000: raise SystemExit('image reaches raw trace page')
+          print('sha256',hashlib.sha256(d).hexdigest()); print('bytes',len(d),'blocks',total,'range',hex(lo)+'..'+hex(hi))
+          PY
+      - name: Manifest
+        run: |
+          cat > build/mdk/F27-M35-R392-FOUR-JCR.manifest.txt <<EOF
+          source_commit=${GITHUB_SHA}
+          base=r389 accepted Adafruit HID infrastructure over r384/M27
+          physical_device=single M27 Nintendo USB address/device identity
+          hid0=JCR native 0x08 proven M27 path
+          hid1=JCR native 0x08 via Adafruit_USBD_HID
+          hid2=JCR native 0x08 via Adafruit_USBD_HID
+          hid3=JCR native 0x08 via Adafruit_USBD_HID
+          selectors=L4,R4,L5,R5 respectively
+          trace=raw 0xEB000 magic 0x32334D52 no filesystem writes
+          hardware_status=PENDING
+          EOF
+          sha256sum build/mdk/OpenPuck-F27-M35-R392-FOUR-JCR-MDK.uf2 >> build/mdk/F27-M35-R392-FOUR-JCR.manifest.txt
+      - name: Upload r392
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-F27-M35-R392-FOUR-JCR
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-F27-M35-R392-FOUR-JCR-MDK.uf2
+            build/mdk/F27-M35-R392-FOUR-JCR.manifest.txt
