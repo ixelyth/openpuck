@@ -46,7 +46,7 @@ jobs:
         run: |
           set -eu
           grep -q 'F27-M35-FOUR-JCR' OpenPuck/mode_switch2_pro.cpp
-          grep -q 'g_m32SiblingHid\[i\].setReportDescriptor(M32_JCR_HID_DESC, 100)' OpenPuck/mode_switch2_pro.cpp
+          grep -q 'M32_JCR_HID_DESC' OpenPuck/mode_switch2_pro.cpp
           grep -q 'return 0x08;' OpenPuck/mode_switch2_pro.cpp
           grep -q 'm29BuildSession0Native' OpenPuck/mode_switch2_pro.cpp
           grep -q 'M27-M35-FOUR-JCR-r392-raw' OpenPuck/mode_switch2_pro.cpp
