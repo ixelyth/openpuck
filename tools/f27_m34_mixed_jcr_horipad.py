@@ -89,7 +89,7 @@ s = s.replace(old, new, 1)
 
 start = s.index("\tuint8_t selected = m32SelectedMask((uint8_t)bond);")
 end = s.index("\tg_sw2SessionCtx = M15_SW2_PRO;\n\tm27TraceService();", start)
-loop = r'''\tuint8_t selected = m32SelectedMask((uint8_t)bond);
+loop = '''	uint8_t selected = m32SelectedMask((uint8_t)bond);
 	static const uint32_t selectorBits[4] = { TB_L4, TB_R4, TB_L5, TB_R5 };
 	for (uint8_t hid = 0; hid < M32_HID_COUNT; hid++) {
 		uint8_t rid = hid == 0 ? 0x08 : 0x00;
