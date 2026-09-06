@@ -1,0 +1,216 @@
+name: R396 Switch 2 HORIPAD O FourSelect r355 raw trace
+
+on:
+  push:
+    branches:
+      - diag-switch2-horipad-o-fourselect-r396-rawtrace
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out r396 diagnostic branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact r355 authority and narrow branch delta
+        run: |
+          set -eu
+          R355=88b8e8cd1b9d028695b99cb294b6d8826699ea2b
+          BASE=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          test "$(git merge-base HEAD "$R355")" = "$R355"
+          git show "$R355:tools/diag_switch2_horipad_o_fourselect.py" > /tmp/r355-transform.py
+          cmp -s /tmp/r355-transform.py tools/diag_switch2_horipad_o_fourselect.py
+          test "$(git diff --name-only "$R355"...HEAD | grep -Ev '^(\.github/workflows/diag-switch2-horipad-o-fourselect-r396-rawtrace\.yml|tools/diag_switch2_horipad_o_fourselect_r396_trace\.py)$' || true)" = ""
+          for f in OpenPuck/mode_switch_hori.cpp OpenPuck/mode_switch_hori.h OpenPuck/serial_console.cpp OpenPuck/usb_tx.cpp OpenPuck/OpenPuck.ino OpenPuck/bonds.cpp OpenPuck/config.cpp Makefile; do
+            git show "$BASE:$f" > /tmp/base
+            cmp -s /tmp/base "$f" || { echo "r396 runtime base drift: $f"; exit 1; }
+          done
+
+      - name: Set up Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install build dependencies
+        run: pip install adafruit-nrfutil intelhex
+
+      - name: Install Adafruit nRF52 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config set board_manager.additional_urls https://adafruit.github.io/arduino-board-index/package_adafruit_index.json
+          arduino-cli core update-index
+          arduino-cli core install adafruit:nrf52
+
+      - name: Apply exact historical Makerdiary patch
+        run: |
+          set -eu
+          MDK=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          git fetch origin "$MDK"
+          git cherry-pick --no-commit "$MDK"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          orig="$(git show "$MDK" --pretty=format: | git patch-id --stable | awk '{print $1}')"
+          applied="$(git diff --cached | git patch-id --stable | awk '{print $1}')"
+          test -n "$orig"
+          test "$orig" = "$applied"
+          git diff --cached --check
+
+      - name: Reconstruct exact r355 Switch 2 HORIPAD O FourSelect
+        run: |
+          set -eu
+          python3 tools/diag_switch2_horipad_o_fourselect.py
+          git diff --check
+          grep -q 'USBDevice.setID(0x0F0D, 0x0202)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'USBDevice.setProductDescriptor("HORIPAD O")' OpenPuck/mode_switch_hori.cpp
+          grep -q 'sizeof SWITCH_HID_DESC == 123' OpenPuck/mode_switch_hori.cpp
+          grep -q 'TB_L4, TB_R4, TB_L5, TB_R5' OpenPuck/mode_switch_hori.cpp
+          grep -q '#define NSLOT 4' OpenPuck/bonds.h
+          cp OpenPuck/mode_switch_hori.cpp /tmp/r355-mode_switch_hori.cpp
+          cp OpenPuck/mode_switch_hori.h /tmp/r355-mode_switch_hori.h
+          cp OpenPuck/serial_console.cpp /tmp/r355-serial_console.cpp
+          cp OpenPuck/usb_tx.cpp /tmp/r355-usb_tx.cpp
+          cp OpenPuck/OpenPuck.ino /tmp/r355-OpenPuck.ino
+          cp OpenPuck/bonds.cpp /tmp/r355-bonds.cpp
+          cp OpenPuck/config.cpp /tmp/r355-config.cpp
+          cp Makefile /tmp/r355-Makefile
+
+      - name: Add trace-only JT observer
+        run: |
+          set -eu
+          python3 tools/diag_switch2_horipad_o_fourselect_r396_trace.py
+          git diff --check
+
+      - name: Prove r355 behavior and observer scope
+        run: |
+          set -eu
+          grep -q 'USBDevice.setID(0x0F0D, 0x0202)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'USBDevice.setProductDescriptor("HORIPAD O")' OpenPuck/mode_switch_hori.cpp
+          grep -q 'sizeof SWITCH_HID_DESC == 123' OpenPuck/mode_switch_hori.cpp
+          grep -q 'TB_L4, TB_R4, TB_L5, TB_R5' OpenPuck/mode_switch_hori.cpp
+          grep -q 'usbTxHid(&g_switch\[u\], 0, p, 8)' OpenPuck/mode_switch_hori.cpp
+          grep -q 'H4_TRACE_PAGE = 0x000EB000UL' OpenPuck/mode_switch_hori.cpp
+          grep -q 'H4_TRACE_MAGIC = 0x36393448UL' OpenPuck/mode_switch_hori.cpp
+          grep -q 'source=Switch2-HORIPAD-O-FourSelect-r396-raw' OpenPuck/mode_switch_hori.cpp
+          grep -q 'switchHoriTraceDump' OpenPuck/serial_console.cpp
+          grep -q 'switchHoriTraceClear' OpenPuck/serial_console.cpp
+          ! grep -q 'InternalFS' OpenPuck/mode_switch_hori.cpp
+          ! grep -q 'LittleFS' OpenPuck/mode_switch_hori.cpp
+          cmp -s /tmp/r355-usb_tx.cpp OpenPuck/usb_tx.cpp || { echo 'r396 changed r355 usb_tx send path'; exit 1; }
+          cmp -s /tmp/r355-OpenPuck.ino OpenPuck/OpenPuck.ino || { echo 'r396 changed r355 OpenPuck.ino'; exit 1; }
+          cmp -s /tmp/r355-bonds.cpp OpenPuck/bonds.cpp || { echo 'r396 changed r355 bonds.cpp'; exit 1; }
+          cmp -s /tmp/r355-config.cpp OpenPuck/config.cpp || { echo 'r396 changed r355 config.cpp'; exit 1; }
+          cmp -s /tmp/r355-Makefile Makefile || { echo 'r396 changed r355 Makefile'; exit 1; }
+          python3 - <<'PY'
+          from pathlib import Path
+          before = Path('/tmp/r355-mode_switch_hori.cpp').read_text()
+          after = Path('OpenPuck/mode_switch_hori.cpp').read_text()
+          for needle in (
+              'USBDevice.setID(0x0F0D, 0x0202);',
+              'USBDevice.setProductDescriptor("HORIPAD O");',
+              'static const uint32_t selector[NSLOT] = { TB_L4, TB_R4, TB_L5, TB_R5 };',
+              'const uint8_t neutral[8] = { 0x00, 0x00, 0x08, 0x80, 0x80, 0x80, 0x80, 0x00 };',
+          ):
+              if before.count(needle) != 1 or after.count(needle) != 1:
+                  raise SystemExit('r355 invariant changed: ' + needle)
+          print('r355 functional invariants retained; observer-only files touched')
+          PY
+
+      - name: Generate r396 build provenance
+        run: |
+          short="${GITHUB_SHA::8}"
+          OPK_BUILD_VERSION="SW2HORI4SEL-R396-TRACE-${short}" ./gen_version.sh
+
+      - name: Build standard target
+        run: |
+          mkdir -p build/r396-standard build/cache/r396-standard
+          make build BUILD_PATH=build/cache/r396-standard OUTPUT_DIR=build/r396-standard
+
+      - name: Build Makerdiary MDK target
+        run: make build-mdk
+
+      - name: Generate r396 MDK UF2
+        run: ./gen_uf2.sh build/mdk/OpenPuck.ino.hex build/mdk/OpenPuck-Switch2-HORIPAD-O-FourSelect-R396-RawTrace-MDK.uf2
+
+      - name: Validate UF2 and diagnostic markers
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os, struct
+          p = Path('build/mdk/OpenPuck-Switch2-HORIPAD-O-FourSelect-R396-RawTrace-MDK.uf2')
+          data = p.read_bytes()
+          if len(data) % 512:
+              raise SystemExit('non-UF2 length')
+          total = family = None
+          seen = []
+          image = bytearray()
+          lo = 0xffffffff
+          hi = 0
+          for off in range(0, len(data), 512):
+              b = data[off:off+512]
+              m0,m1,flags,addr,size,no,nblocks,fam = struct.unpack_from('<IIIIIIII', b, 0)
+              if (m0,m1) != (0x0A324655,0x9E5D5157):
+                  raise SystemExit('bad UF2 magic')
+              total = nblocks if total is None else total
+              family = fam if family is None else family
+              if nblocks != total or fam != family:
+                  raise SystemExit('inconsistent UF2 metadata')
+              seen.append(no)
+              lo = min(lo, addr)
+              hi = max(hi, addr + size)
+              if addr >= 0x26000:
+                  image += b[32:32+size]
+          if seen != list(range(total)):
+              raise SystemExit('non-sequential UF2 blocks')
+          if family != 0xADA52840:
+              raise SystemExit('wrong UF2 family')
+          if hi > 0xEB000:
+              raise SystemExit(f'UF2 reaches trace page: {hi:#x}')
+          short = os.environ['GITHUB_SHA'][:8].encode()
+          for needle,label in (
+              (b'SW2HORI4SEL-R396-TRACE-' + short, 'build marker'),
+              (b'HORIPAD O', 'HORIPAD O identity'),
+              (b'Switch2-HORIPAD-O-FourSelect-r396-raw', 'trace source'),
+              (b'# JT begin', 'JT dump'),
+          ):
+              if needle not in image:
+                  raise SystemExit('missing ' + label)
+          print('sha256', hashlib.sha256(data).hexdigest())
+          print('blocks', total, 'family', hex(family), 'bytes', len(data), 'range', hex(lo)+'..'+hex(hi))
+          PY
+
+      - name: Record r396 manifest
+        run: |
+          cat > build/mdk/Switch2-HORIPAD-O-FourSelect-R396-RawTrace.manifest.txt <<EOF
+          purpose=JT trace-only replay of exact r355 Switch 2 HORIPAD O FourSelect
+          source_commit=${GITHUB_SHA}
+          r355_authority=88b8e8cd1b9d028695b99cb294b6d8826699ea2b
+          runtime_base=29f4d1e8b85c0a7c19e0c8b977a1a56a2c42ea6d
+          historical_mdk_patch=0d1b378e9e75c52b6ea119e685257f4c3c1ac17e
+          identity=0F0D:0202 HORI CO.,LTD. / HORIPAD O
+          descriptor=exact preserved F16 123-byte capture
+          report_mapping=exact preserved r355/F16 8-byte HORIPAD O contract
+          topology=4 HIDs; all neutral by default; L4/R4/L5/R5 FourSelect unchanged from r355
+          trace=per-HID first not-ready/ready/report-enqueue events; raw page 0xEB000 magic 0x36393448; JT dump / JC clear
+          proven_send_path=usbTxHid and usb_tx.cpp unchanged from r355 reconstruction
+          experimental_filesystem_writes=NONE
+          hardware_status=PENDING
+          EOF
+          sha256sum build/mdk/OpenPuck-Switch2-HORIPAD-O-FourSelect-R396-RawTrace-MDK.uf2 >> build/mdk/Switch2-HORIPAD-O-FourSelect-R396-RawTrace.manifest.txt
+
+      - name: Upload r396 diagnostic package
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenPuck-Switch2-HORIPAD-O-FourSelect-R396-RawTrace
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            build/mdk/OpenPuck-Switch2-HORIPAD-O-FourSelect-R396-RawTrace-MDK.uf2
+            build/mdk/Switch2-HORIPAD-O-FourSelect-R396-RawTrace.manifest.txt
