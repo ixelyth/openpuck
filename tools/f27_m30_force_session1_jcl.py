@@ -50,6 +50,23 @@ src = replace_once(
     "marker retain",
 )
 
+# Rewrite only the original r384 drain call sites BEFORE defining wrappers, so
+# the transform cannot accidentally match the wrappers' own TinyUSB calls.
+ready_calls = list(re.finditer(r'tud_hid_n_ready\(([^)]+)\)', src))
+if len(ready_calls) != 1:
+    raise SystemExit(f"M30 expected one baseline tud_hid_n_ready call, found {len(ready_calls)}")
+m = ready_calls[0]
+src = src[:m.start()] + f"m30HidReady(s, {m.group(1)})" + src[m.end():]
+
+report_matches = list(re.finditer(
+    r'tud_hid_n_report\(([^,]+),\s*rid,\s*p,\s*sizeof p\)', src))
+if len(report_matches) != 1:
+    raise SystemExit(f"M30 expected one baseline periodic tud_hid_n_report call, found {len(report_matches)}")
+m = report_matches[0]
+src = (src[:m.start()] +
+       f"m30HidReport(s, {m.group(1).strip()}, rid, p, sizeof p)" +
+       src[m.end():])
+
 helper = r'''
 // r386 discriminator: session1 is deliberately not given synthetic Nintendo
 // vendor traffic. It only inherits state that gates native HID streaming.
@@ -101,23 +118,6 @@ src = regex_once(
     '\n\tif (g_sw2SessionCtx == M15_SW2_PRO)\n\t\tm30MirrorSession0ToJcl();\n\1',
     "post-command mirror",
 )
-
-# Preserve the accepted drain logic: wrap only its one readiness call.
-ready_calls = list(re.finditer(r'tud_hid_n_ready\(([^)]+)\)', src))
-if len(ready_calls) != 1:
-    raise SystemExit(f"M30 expected one tud_hid_n_ready call, found {len(ready_calls)}")
-m = ready_calls[0]
-src = src[:m.start()] + f"m30HidReady(s, {m.group(1)})" + src[m.end():]
-
-# Likewise wrap only the native periodic report submission call.
-report_matches = list(re.finditer(
-    r'tud_hid_n_report\(([^,]+),\s*rid,\s*p,\s*sizeof p\)', src))
-if len(report_matches) != 1:
-    raise SystemExit(f"M30 expected one periodic tud_hid_n_report call, found {len(report_matches)}")
-m = report_matches[0]
-src = (src[:m.start()] +
-       f"m30HidReport(s, {m.group(1).strip()}, rid, p, sizeof p)" +
-       src[m.end():])
 
 MODE.write_text(src, encoding="utf-8")
 print("F27-M30 r386 forced session1 JCL discriminator applied")
